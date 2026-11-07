@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Expede
+Comment=A desktop that looks and behaves like Windows XP
+Exec=expede
+Type=Application
+DesktopNames=Expede

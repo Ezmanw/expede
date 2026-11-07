@@ -1,0 +1,18 @@
+# Never commit anything ripped from a Windows ISO, or VM disks
+/assets-src/
+/vm/*.qcow2
+/vm/seed.iso
+/vm/seed/
+/vm/vm_key*
+/vm/qmp.sock
+/vm/SHA512SUMS
+/build/
+__pycache__/
+/vm/audio.wav
+# screenshots show Microsoft's artwork; they stay local
+/docs/
+/xp/
+*.wav
+*.ttf
+*.msstyles
+*.iso

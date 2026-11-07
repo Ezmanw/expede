@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Expede Settings
+Comment=Snap, Start menu style and touchpad options
+Exec=expede-settings
+Icon=preferences-desktop
+Type=Application
+OnlyShowIn=Expede;
+Categories=Settings;

@@ -1,0 +1,153 @@
+#ifndef EXPEDE_H
+#define EXPEDE_H
+
+#include <stdbool.h>
+#include <cairo.h>
+#include <wayland-server-core.h>
+#include <wlr/backend.h>
+#include <wlr/render/allocator.h>
+#include <wlr/render/wlr_renderer.h>
+#include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_output_layout.h>
+#include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_server_decoration.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
+#include <wlr/types/wlr_xdg_shell.h>
+
+#include "theme.h"
+
+/* takes ownership of s */
+struct wlr_buffer *buffer_from_cairo(cairo_surface_t *s);
+/* put a canvas_new() surface in the scene (creating *node the first time) at its logical size; takes s */
+void scene_show(struct wlr_scene_buffer **node, struct wlr_scene_tree *parent, cairo_surface_t *s, int x, int y);
+
+/* ---- compositor (main.c) ---- */
+
+#define BORDER 4
+#define CAPTION 30
+#define TASKBAR_H 30
+
+enum part { PART_NONE, PART_CAPTION, PART_CLOSE, PART_MAX, PART_MIN, PART_BORDER };
+
+struct view {
+	struct wl_list link;
+	struct server *server;
+	struct wlr_xdg_toplevel *xt;
+	struct wlr_scene_tree *tree, *content;
+	struct wlr_scene_buffer *deco[4]; /* caption, left, right, bottom */
+	struct icon_set icon;
+	int x, y, cw, ch;
+	bool mapped, minimized, maximized, active, snapped;
+	bool csd; /* the app draws its own title bar; Expede adds no frame */
+	bool fullscreen;
+	struct wlr_box pre_fullscreen;
+	struct wlr_box saved, presnap;
+	enum part hot, pressed;
+	struct wlr_xdg_toplevel_decoration_v1 *decoration;
+	struct wl_listener map, unmap, commit, destroy, request_move, request_resize;
+	struct wl_listener request_maximize, request_minimize, request_fullscreen, set_title, set_app_id;
+	struct wl_listener deco_destroy, deco_request_mode;
+};
+
+enum grab_mode { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_BUTTON };
+
+struct server {
+	struct wl_display *display;
+	struct wlr_backend *backend;
+	struct wlr_renderer *renderer;
+	struct wlr_allocator *allocator;
+	struct wlr_scene *scene;
+	struct wlr_scene_output_layout *scene_layout;
+	struct wlr_scene_tree *layer_desktop, *layer_views, *layer_shell, *layer_menu;
+	struct wlr_output_layout *output_layout;
+	struct wl_list outputs, keyboards, views;
+	struct wlr_xdg_shell *xdg_shell;
+	struct wlr_xdg_decoration_manager_v1 *deco_mgr;
+	struct wlr_server_decoration_manager *kde_deco_mgr;
+	struct wlr_cursor *cursor;
+	struct wlr_xcursor_manager *cursor_mgr;
+	struct wlr_seat *seat;
+	struct theme theme;
+
+	enum grab_mode grab;
+	struct view *grab_view;
+	double grab_x, grab_y;
+	struct wlr_box grab_box;
+	uint32_t resize_edges;
+	uint32_t last_click_ms;
+	/* options from ~/.config/expede/expede.conf */
+	bool opt_snap, opt_tap, opt_modern_start, opt_natural_scroll;
+	int opt_pointer_speed; /* -100..100, 0 = default */
+	struct wl_list pointers; /* struct pointer_dev */
+	double opt_scale; /* 0 = pick from the screen's DPI */
+	bool opt_sounds, opt_clock24;
+	char opt_wallpaper[256], opt_wallpaper_style[16], opt_user_picture[64], opt_keyboard[64];
+	int snap_zone;
+	struct wlr_scene_rect *snap_preview;
+	double last_click_x, last_click_y;
+
+	struct shell *shell;
+	struct session *session;
+	struct wlr_scene_tree *layer_overlay, *layer_fullscreen;
+
+	struct wl_listener new_output, new_xdg_toplevel, new_xdg_popup, new_decoration;
+	struct wl_listener cursor_motion, cursor_motion_abs, cursor_button, cursor_axis, cursor_frame;
+	struct wl_listener new_input, request_cursor, request_set_selection, request_set_primary;
+	struct wl_listener request_activate, request_cursor_shape;
+};
+
+void view_focus(struct view *v);
+void view_set_minimized(struct view *v, bool min);
+void view_close(struct view *v);
+void spawn(const char *cmd);
+void server_screen(struct server *s, int *w, int *h);
+
+#include "volume.h"
+
+/* ---- installed applications (apps.c) ---- */
+
+struct app {
+	char *id, *name, *exec, *icon_name, *keywords;
+	cairo_surface_t *icon;
+	bool icon_tried;
+};
+
+void apps_load(void);
+struct app *apps_all(int *n);              /* sorted by name */
+cairo_surface_t *app_icon(struct theme *t, struct app *a); /* 32px; XP's generic icon if none */
+bool app_matches(struct app *a, const char *query);
+
+/* ---- shell (shell.c): desktop, taskbar, start menu ---- */
+
+struct shell *shell_create(struct server *s);
+void shell_layout(struct shell *sh);   /* output size changed */
+void shell_views_changed(struct shell *sh);
+/* pointer events in layout coords; return true when the shell took the event */
+bool shell_motion(struct shell *sh, double x, double y, bool over_view);
+bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, bool over_view);
+void shell_toggle_start(struct shell *sh);
+bool shell_start_open(struct shell *sh);
+/* keys and wheel while the Start menu is open; true when used */
+bool shell_key(struct shell *sh, uint32_t sym, const char *utf8);
+bool shell_axis(struct shell *sh, double x, double y, double delta);
+void shell_reconfigure(struct shell *sh); /* options changed */
+/* volume keys: step in percent, or toggle mute */
+void shell_volume_key(struct shell *sh, int step, bool toggle_mute);
+
+/* ---- session (session.c): welcome screen, log off, Turn Off dialog, sounds ---- */
+
+struct session *session_create(struct server *s, bool autologin);
+void session_layout(struct session *se);
+/* true while a full-screen session UI owns the pointer and keyboard */
+bool session_active(struct session *se);
+void session_motion(struct session *se, double x, double y);
+void session_button(struct session *se, double x, double y, bool pressed);
+void session_key(struct session *se, uint32_t sym);
+void session_logoff(struct session *se);
+void session_turnoff_dialog(struct session *se);
+/* XP sound events: startup, logon, logoff, shutdown, minimize, restore, ... */
+void sound_play(struct server *s, const char *name);
+
+#endif
