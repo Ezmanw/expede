@@ -75,7 +75,7 @@ void spawn(const char *cmd) {
 static struct icon_set icon_for_app(struct theme *t, const char *app_id) {
 	if (app_id && strstr(app_id, "foot"))
 		return theme_icon(t, "cmd");
-	if (app_id && (strstr(app_id, "featherpad") || strstr(app_id, "FeatherPad")))
+	if (app_id && (strstr(app_id, "featherpad") || strstr(app_id, "FeatherPad") || strstr(app_id, "ousepad")))
 		return theme_icon(t, "notepad");
 	if (app_id && strstr(app_id, "expede-settings"))
 		return theme_icon(t, "control-panel");
@@ -409,6 +409,7 @@ static void on_map(struct wl_listener *l, void *data) {
 	v->mapped = true;
 	wlr_scene_node_set_enabled(&v->tree->node, true);
 	v->icon = icon_for_app(&v->server->theme, v->xt->app_id);
+	wlr_log(WLR_DEBUG, "mapped \"%s\" (app_id %s)", v->xt->title ? v->xt->title : "", v->xt->app_id ? v->xt->app_id : "none");
 	view_focus(v);
 	/* apps can ask for fullscreen before their first frame (foot --fullscreen, kiosk modes) */
 	if (v->xt->requested.fullscreen)
@@ -1491,6 +1492,10 @@ int main(int argc, char *argv[]) {
 	}
 	setenv("WAYLAND_DISPLAY", socket, true);
 	setenv("XDG_CURRENT_DESKTOP", "Expede", true);
+	/* GTK apps draw their own widgets with the theme xprip generated from the same
+	 * Luna bitmaps (only apps started inside Expede; other sessions are untouched) */
+	if (!getenv("GTK_THEME"))
+		setenv("GTK_THEME", "Expede-XP", true);
 	setenv("QT_QPA_PLATFORM", "wayland", true);
 	shell_layout(s.shell);
 	s.session = session_create(&s, autologin);

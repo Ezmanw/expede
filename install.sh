@@ -10,7 +10,7 @@ sudo apt-get update -qq
 sudo apt-get install -y build-essential meson ninja-build pkg-config p7zip-full \
 	libwlroots-0.18-dev wayland-protocols libwayland-dev libxkbcommon-dev libcairo2-dev \
 	libpango1.0-dev libpixman-1-dev libinput-dev libgdk-pixbuf-2.0-dev libdrm-dev \
-	foot featherpad pcmanfm-qt qt6-wayland qtwayland5 fonts-dejavu-core alsa-utils brightnessctl
+	foot mousepad pcmanfm-qt qt6-wayland qtwayland5 fonts-dejavu-core alsa-utils brightnessctl
 
 echo "== Windows XP theme files"
 mkdir -p "$HOME/.local/share/expede" "$HOME/.local/share/fonts"
@@ -19,6 +19,7 @@ if [ -n "$1" ]; then
 elif [ -d xp ]; then
 	rm -rf "$HOME/.local/share/expede/xp"
 	cp -r xp "$HOME/.local/share/expede/xp"
+	python3 -I tools/gtktheme.py "$HOME/.local/share/expede/xp" "$HOME/.local/share/themes"
 else
 	echo "No ripped files here: run ./install.sh /path/to/your/winxp.iso" >&2
 	exit 1

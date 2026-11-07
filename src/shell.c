@@ -994,7 +994,7 @@ struct shell *shell_create(struct server *s) {
 	add_item(sh, ITEM_PINNED, "Command Prompt", "cmd", "foot");
 	add_item(sh, ITEM_PINNED, "Windows Explorer", "explorer", "expede-explorer ~");
 	add_item(sh, ITEM_SEP_LEFT, NULL, NULL, NULL);
-	add_item(sh, ITEM_MFU, "Notepad", "notepad", "featherpad");
+	add_item(sh, ITEM_MFU, "Notepad", "notepad", "mousepad");
 	add_item(sh, ITEM_ALL_PROGRAMS, "All Programs", NULL, NULL);
 	add_item(sh, ITEM_PLACE_BOLD, "My Documents", "my-documents", "expede-explorer ~");
 	add_item(sh, ITEM_PLACE_BOLD, "My Pictures", "my-pictures", "expede-explorer ~/Pictures");

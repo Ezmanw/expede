@@ -466,7 +466,11 @@ def main():
                 bmp_to_png(os.path.join(rd, '.rsrc', 'BITMAP', f'{bid}.bmp'), os.path.join(out, 'logon', name + '.png'),
                            key='corner' if name == 'logo' else (255, 0, 255))
 
-    print(f'xprip: {n} Luna bitmaps, {len(ICONS)} icons -> {out}')
+    # a GTK theme from the same bitmaps, so GTK apps' widgets match
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import gtktheme
+    gtk = gtktheme.build(out, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(out))), 'themes'))
+    print(f'xprip: {n} Luna bitmaps, {len(ICONS)} icons -> {out}; GTK theme -> {gtk}')
 
 
 if __name__ == '__main__':

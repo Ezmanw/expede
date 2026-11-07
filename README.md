@@ -63,6 +63,9 @@ XP's category view, or classic view if you prefer. Each applet is an XP property
 | Date and Time | 12/24-hour clock, keyboard layout |
 | User Accounts | XP's account pictures |
 
+### Apps match too
+The ripper also builds a **GTK 3/4 theme** from the same Luna bitmaps. It covers buttons, checkboxes and radio buttons, scroll bars with XP's arrows, tabs, green block progress bars, combo boxes, list headers, menus and tooltips. Expede applies it to apps started inside it, so other desktop sessions keep their own look. GNOME's libadwaita apps keep their own style.
+
 ### Works like a modern desktop underneath
 - **HiDPI:** the scale is picked from your screen's DPI (100–300%). The bitmaps are pixel-doubled so they stay crisp, and apps render sharp through fractional scaling.
 - **Volume and brightness keys**, through PipeWire, PulseAudio or ALSA, whichever is installed.
@@ -81,7 +84,7 @@ cd expede
 ```
 
 That installs the build tools and a few apps (foot as Command Prompt,
-FeatherPad as Notepad), rips your ISO into
+Mousepad as Notepad), rips your ISO into
 `~/.local/share/expede/xp`, builds Expede and installs it.
 
 Then log out, choose **Expede** from your login screen's session menu, and log in.
@@ -139,6 +142,7 @@ src/ui.c        the toolkit Explorer is built on: windows, widgets, keyboard
 src/apps.c      installed apps from .desktop files
 src/volume.c    wpctl / pactl / amixer
 tools/xprip.py  the ripper
+tools/gtktheme.py  builds the GTK theme from the ripped bitmaps
 vm/             a QEMU test VM that boots straight into Expede
 ```
 
@@ -147,7 +151,7 @@ vm/             a QEMU test VM that boots straight into Expede
 ## Roadmap
 
 - **Windows 7**, with the Frutiger Aero glass effect as a toggle and an option to mix XP and 7 parts
-- Apps' own buttons, scrollbars and checkboxes drawn with the Windows bitmaps (GTK and Qt)
+- Qt apps themed to match (GTK is done)
 - More Control Panel: network, Bluetooth, displays, power, default apps
 
 ## License
