@@ -736,7 +736,10 @@ static void set_hot(struct server *s, struct view *hv, enum part p) {
 	}
 }
 
+static void reset_idle(struct server *s);
+
 static void process_motion(struct server *s, uint32_t time) {
+	reset_idle(s);
 	double lx = s->cursor->x, ly = s->cursor->y;
 	if (s->session && session_active(s->session)) {
 		s->grab = GRAB_NONE;
@@ -996,6 +999,7 @@ static void kb_key(struct wl_listener *l, void *data) {
 	struct keyboard *k = wl_container_of(l, k, key);
 	struct server *s = k->server;
 	struct wlr_keyboard_key_event *e = data;
+	reset_idle(s);
 	uint32_t keycode = e->keycode + 8;
 	const xkb_keysym_t *syms;
 	int n = xkb_state_key_get_syms(k->wlr_keyboard->xkb_state, keycode, &syms);
@@ -1175,13 +1179,17 @@ static void output_request_state(struct wl_listener *l, void *data) {
 		session_layout(o->server->session);
 }
 
+static void write_outputs_status(struct server *s);
+
 static void output_destroy(struct wl_listener *l, void *data) {
 	struct output *o = wl_container_of(l, o, destroy);
 	wl_list_remove(&o->frame.link);
 	wl_list_remove(&o->request_state.link);
 	wl_list_remove(&o->destroy.link);
 	wl_list_remove(&o->link);
+	struct server *s = o->server;
 	free(o);
+	write_outputs_status(s);
 }
 
 /* Like Windows: 96 dpi is 100%, and a sharper screen gets the next step down from
@@ -1200,6 +1208,58 @@ static double pick_scale(struct server *s, struct wlr_output *wo, int width_px) 
 	return pick;
 }
 
+static struct output_conf *output_conf(struct server *s, const char *name) {
+	for (int i = 0; i < s->n_out_conf; i++)
+		if (!strcmp(s->out_conf[i].name, name))
+			return &s->out_conf[i];
+	return NULL;
+}
+
+/* the mode the Control Panel picked for this screen, else the screen's own preference */
+static struct wlr_output_mode *wanted_mode(struct server *s, struct wlr_output *wo) {
+	struct output_conf *c = output_conf(s, wo->name);
+	if (c && c->w > 0) {
+		struct wlr_output_mode *m, *best = NULL;
+		wl_list_for_each(m, &wo->modes, link)
+			if (m->width == c->w && m->height == c->h &&
+					(!best || abs(m->refresh - c->refresh_mhz) < abs(best->refresh - c->refresh_mhz)))
+				best = m;
+		if (best)
+			return best;
+	}
+	return wlr_output_preferred_mode(wo);
+}
+
+/* ~/.cache/expede/outputs: one line per screen for the Control Panel's Settings tab:
+ * name, description, current WxH, refresh (mHz), scale, enabled, then every mode */
+static void write_outputs_status(struct server *s) {
+	char dir[512], path[600];
+	const char *xdg = getenv("XDG_CACHE_HOME");
+	if (xdg && *xdg)
+		snprintf(dir, sizeof(dir), "%s/expede", xdg);
+	else
+		snprintf(dir, sizeof(dir), "%s/.cache/expede", getenv("HOME"));
+	mkdir(dir, 0755);
+	snprintf(path, sizeof(path), "%s/outputs", dir);
+	FILE *f = fopen(path, "w");
+	if (!f)
+		return;
+	struct output *o;
+	wl_list_for_each(o, &s->outputs, link) {
+		struct wlr_output *wo = o->wlr_output;
+		fprintf(f, "%s\t%s %s\t%dx%d\t%d\t%.2f\t%d\t", wo->name, wo->make ? wo->make : "", wo->model ? wo->model : "",
+			wo->width, wo->height, wo->refresh, wo->scale, wo->enabled);
+		struct wlr_output_mode *m;
+		bool first = true;
+		wl_list_for_each(m, &wo->modes, link) {
+			fprintf(f, "%s%dx%d@%d", first ? "" : ",", m->width, m->height, m->refresh);
+			first = false;
+		}
+		fputc('\n', f);
+	}
+	fclose(f);
+}
+
 static void on_new_output(struct wl_listener *l, void *data) {
 	struct server *s = wl_container_of(l, s, new_output);
 	struct wlr_output *wo = data;
@@ -1207,9 +1267,12 @@ static void on_new_output(struct wl_listener *l, void *data) {
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
 	wlr_output_state_set_enabled(&st, true);
-	struct wlr_output_mode *mode = wlr_output_preferred_mode(wo);
+	struct wlr_output_mode *mode = wanted_mode(s, wo);
 	if (mode)
 		wlr_output_state_set_mode(&st, mode);
+	struct output_conf *oc = output_conf(s, wo->name);
+	if (oc && oc->disabled && !wl_list_empty(&s->outputs))
+		wlr_output_state_set_enabled(&st, false); /* never switch off the only screen */
 	double scale = pick_scale(s, wo, mode ? mode->width : wo->width);
 	wlr_output_state_set_scale(&st, scale);
 	ui_scale = scale;
@@ -1229,6 +1292,7 @@ static void on_new_output(struct wl_listener *l, void *data) {
 	wl_list_insert(&s->outputs, &o->link);
 
 	struct wlr_output_layout_output *lo = wlr_output_layout_add_auto(s->output_layout, wo);
+	write_outputs_status(s);
 	struct wlr_scene_output *so = wlr_scene_output_create(s->scene, wo);
 	wlr_scene_output_layout_add_output(s->scene_layout, lo, so);
 	if (s->shell)
@@ -1263,7 +1327,9 @@ static const char *default_assets(void) {
  *   user_picture = duck    one of XP's account pictures
  *   sounds = false         no system sounds
  *   clock = 24             24-hour clock in the tray
- *   keyboard_layout = gb   any XKB layout, optionally "gb(extd)" style variant */
+ *   keyboard_layout = gb   any XKB layout, optionally "gb(extd)" style variant
+ *   screen_off = 10        minutes idle before the screens switch off (0 = never)
+ *   output.HDMI-A-1.mode = 1920x1080@60     output.eDP-1.enabled = false */
 static bool conf_true(const char *v) {
 	return !strcasecmp(v, "true") || !strcasecmp(v, "yes") || !strcasecmp(v, "on") || !strcmp(v, "1");
 }
@@ -1279,6 +1345,8 @@ static void load_config(struct server *s) {
 	snprintf(s->opt_wallpaper_style, sizeof(s->opt_wallpaper_style), "auto");
 	s->opt_user_picture[0] = 0;
 	s->opt_keyboard[0] = 0;
+	s->opt_screen_off = 10;
+	s->n_out_conf = 0;
 	char path[512];
 	const char *xdg = getenv("XDG_CONFIG_HOME");
 	if (xdg && *xdg)
@@ -1323,6 +1391,27 @@ static void load_config(struct server *s) {
 			snprintf(s->opt_wallpaper_style, sizeof(s->opt_wallpaper_style), "%s", val);
 		else if (!strcmp(key, "user_picture"))
 			snprintf(s->opt_user_picture, sizeof(s->opt_user_picture), "%s", val);
+		else if (!strcmp(key, "screen_off"))
+			s->opt_screen_off = atoi(val);
+		else if (!strncmp(key, "output.", 7) && strrchr(key, '.') > key + 7 && s->n_out_conf < 8) {
+			/* output.<name>.mode = 1920x1080@60   output.<name>.enabled = false */
+			char name[32];
+			const char *dot = strrchr(key, '.');
+			snprintf(name, sizeof(name), "%.*s", (int)(dot - key - 7), key + 7);
+			struct output_conf *c = output_conf(s, name);
+			if (!c) {
+				c = &s->out_conf[s->n_out_conf++];
+				memset(c, 0, sizeof(*c));
+				snprintf(c->name, sizeof(c->name), "%s", name);
+			}
+			if (!strcmp(dot, ".mode")) {
+				double hz = 0;
+				sscanf(val, "%dx%d@%lf", &c->w, &c->h, &hz);
+				c->refresh_mhz = (int)(hz * 1000 + 0.5);
+			} else if (!strcmp(dot, ".enabled")) {
+				c->disabled = !conf_true(val);
+			}
+		}
 		else if (!strcmp(key, "keyboard_layout"))
 			snprintf(s->opt_keyboard, sizeof(s->opt_keyboard), "%s", val);
 	}
@@ -1330,6 +1419,41 @@ static void load_config(struct server *s) {
 }
 
 /* expede-settings sends SIGHUP after saving, so changes apply without logging off */
+/* ---- screens off after idling, like XP's "Turn off monitor" power setting ---- */
+
+static void set_screens(struct server *s, bool on) {
+	struct output *o;
+	wl_list_for_each(o, &s->outputs, link) {
+		struct output_conf *oc = output_conf(s, o->wlr_output->name);
+		if (on && oc && oc->disabled && wl_list_length(&s->outputs) > 1)
+			continue;
+		struct wlr_output_state st;
+		wlr_output_state_init(&st);
+		wlr_output_state_set_enabled(&st, on);
+		wlr_output_commit_state(o->wlr_output, &st);
+		wlr_output_state_finish(&st);
+	}
+	s->screens_off = !on;
+}
+
+static int idle_fire(void *data) {
+	struct server *s = data;
+	/* video players and the like hold an idle inhibitor while they play */
+	if (!wl_list_empty(&s->idle_inhibit->inhibitors)) {
+		wl_event_source_timer_update(s->idle_timer, 30000);
+		return 0;
+	}
+	set_screens(s, false);
+	return 0;
+}
+
+static void reset_idle(struct server *s) {
+	if (s->screens_off)
+		set_screens(s, true);
+	if (s->idle_timer)
+		wl_event_source_timer_update(s->idle_timer, s->opt_screen_off > 0 ? s->opt_screen_off * 60000 : 0);
+}
+
 static int on_sighup(int sig, void *data) {
 	struct server *s = data;
 	load_config(s);
@@ -1344,14 +1468,22 @@ static int on_sighup(int sig, void *data) {
 	session_layout(s->session);
 	struct output *o;
 	wl_list_for_each(o, &s->outputs, link) {
-		double scale = pick_scale(s, o->wlr_output, o->wlr_output->width);
-		if (scale == o->wlr_output->scale)
+		struct wlr_output *wo = o->wlr_output;
+		struct wlr_output_mode *mode = wanted_mode(s, wo);
+		struct output_conf *oc = output_conf(s, wo->name);
+		bool enable = !(oc && oc->disabled) || wl_list_length(&s->outputs) == 1;
+		double scale = pick_scale(s, wo, mode ? mode->width : wo->width);
+		if (scale == wo->scale && (!mode || mode == wo->current_mode) && enable == wo->enabled)
 			continue;
 		struct wlr_output_state st;
 		wlr_output_state_init(&st);
+		wlr_output_state_set_enabled(&st, enable);
+		if (mode)
+			wlr_output_state_set_mode(&st, mode);
 		wlr_output_state_set_scale(&st, scale);
-		wlr_output_commit_state(o->wlr_output, &st);
+		wlr_output_commit_state(wo, &st);
 		wlr_output_state_finish(&st);
+		write_outputs_status(s);
 		ui_scale = scale;
 		/* redraw everything at the new size */
 		shell_layout(s->shell);
@@ -1369,6 +1501,7 @@ static int on_sighup(int sig, void *data) {
 	shell_reconfigure(s->shell);
 	if (s->opt_snap == false)
 		snap_preview(s, SNAP_NONE);
+	reset_idle(s);
 	wlr_log(WLR_INFO, "settings reloaded");
 	return 0;
 }
@@ -1482,6 +1615,8 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&s.seat->events.request_set_selection, &s.request_set_selection);
 
 	s.shell = shell_create(&s);
+	s.idle_inhibit = wlr_idle_inhibit_v1_create(s.display);
+	s.idle_timer = wl_event_loop_add_timer(wl_display_get_event_loop(s.display), idle_fire, &s);
 	wl_event_loop_add_signal(wl_display_get_event_loop(s.display), SIGHUP, on_sighup, &s);
 
 	const char *socket = wl_display_add_socket_auto(s.display);
@@ -1501,6 +1636,11 @@ int main(int argc, char *argv[]) {
 	s.session = session_create(&s, autologin);
 	session_layout(s.session);
 	wlr_cursor_set_xcursor(s.cursor, s.cursor_mgr, "default");
+	reset_idle(&s);
+	/* asks for your password when a setting needs it (time zone, printers...), in XP style
+	 * since it is a GTK program */
+	if (access("/usr/bin/lxpolkit", X_OK) == 0)
+		spawn("/usr/bin/lxpolkit");
 	if (startup)
 		spawn(startup);
 	wlr_log(WLR_INFO, "Expede running on WAYLAND_DISPLAY=%s", socket);

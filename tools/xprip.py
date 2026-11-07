@@ -305,6 +305,9 @@ ICONS += [
     ('shell32.dll', 272, 'cp-hardware'), ('shell32.dll', 276, 'cp-datetime'),
     ('shell32.dll', 269, 'cp-users'), ('shell32.dll', 40, 'cp-taskbar'),
     ('shell32.dll', 180, 'cp-display'), ('shell32.dll', 273, 'cp-network'),
+    ('shell32.dll', 271, 'cp-programs'), ('shell32.dll', 275, 'cp-performance'),
+    ('shell32.dll', 268, 'cp-accessibility'), ('shell32.dll', 17, 'cp-printer'),
+    ('stobject.dll', 210, 'cp-power'), ('shell32.dll', 274, 'cp-system'),
 ]
 
 # Explorer: file types and drives
@@ -469,7 +472,8 @@ def main():
     # a GTK theme from the same bitmaps, so GTK apps' widgets match
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import gtktheme
-    gtk = gtktheme.build(out, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(out))), 'themes'))
+    # <data>/expede/xp -> <data>/themes
+    gtk = gtktheme.build(out, os.path.join(os.path.dirname(os.path.dirname(out)), 'themes'))
     print(f'xprip: {n} Luna bitmaps, {len(ICONS)} icons -> {out}; GTK theme -> {gtk}')
 
 

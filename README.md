@@ -52,16 +52,27 @@ Expede's own file manager, drawn with the same theme bitmaps:
 - **Shortcuts:** F2, Delete (Shift+Delete deletes permanently), Ctrl+A/C/X/V, Backspace, Alt+arrows, Ctrl+L, Ctrl+Shift+N and type-to-select.
 
 ### The Control Panel
-XP's category view, or classic view if you prefer. Each applet is an XP property sheet with tabs and OK / Cancel / Apply, and changes apply instantly with no logging out:
+XP's Control Panel, laid out the same way:
 
-| Applet | Settings |
+- **Category view:** pick a category such as *Performance and Maintenance* to see its Control Panel icons. Classic View lists every applet at once.
+- **Each applet is an XP property sheet** with tabs and OK / Cancel / Apply. Changes apply straight away, with no logging out.
+
+| Applet | What it does |
 |---|---|
-| Display | 29 XP wallpapers (Stretch / Center / Tile, with a preview), size of text and items |
+| Display | 29 XP wallpapers with a preview, size of text and items, screen resolution and refresh rate for each monitor |
 | Taskbar and Start Menu | window snapping |
-| Sounds and Audio Devices | live volume slider and mute, sound scheme |
+| Network Connections | Wi-Fi on and off, available networks with signal bars, connect with a key, connection status (NetworkManager) |
+| Add or Remove Programs | every installed program, with Remove (apt or flatpak, in a terminal so you can see it) |
+| Program Access and Defaults | which program opens web links, e-mail, text, pictures, music, video, folders and PDFs |
+| Sounds and Audio Devices | live volume and mute, sound scheme, choice of speaker and microphone, microphone level |
+| System | your OS, kernel, CPU, memory and computer name |
+| Power Options | turn off the monitor after idling (videos keep it on), power profiles, battery meter |
 | Mouse | pointer speed, tap to click, natural scrolling |
-| Date and Time | 12/24-hour clock, keyboard layout |
+| Bluetooth Devices | turn it on and off, add (scan), connect, disconnect and remove devices |
+| Date and Time | 12/24-hour clock, time zone, keyboard layout |
 | User Accounts | XP's account pictures |
+
+Settings that need your password (like the time zone) ask through an XP-styled prompt (lxpolkit).
 
 ### Apps match too
 The ripper also builds a **GTK 3/4 theme** from the same Luna bitmaps. It covers buttons, checkboxes and radio buttons, scroll bars with XP's arrows, tabs, green block progress bars, combo boxes, list headers, menus and tooltips. Expede applies it to apps started inside it, so other desktop sessions keep their own look. GNOME's libadwaita apps keep their own style.
@@ -121,6 +132,8 @@ snap = false
 tap_to_click = true
 natural_scroll = true
 pointer_speed = 0         # -100 … 100
+screen_off = 10           # minutes; 0 = never
+output.HDMI-A-1.mode = 1920x1080@60
 sounds = true
 clock = 12                # or 24
 keyboard_layout = gb      # any XKB layout, e.g. us(dvorak)
@@ -152,7 +165,6 @@ vm/             a QEMU test VM that boots straight into Expede
 
 - **Windows 7**, with the Frutiger Aero glass effect as a toggle and an option to mix XP and 7 parts
 - Qt apps themed to match (GTK is done)
-- More Control Panel: network, Bluetooth, displays, power, default apps
 
 ## License
 

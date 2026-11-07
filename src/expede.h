@@ -12,6 +12,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_server_decoration.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
@@ -84,6 +85,13 @@ struct server {
 	double opt_scale; /* 0 = pick from the screen's DPI */
 	bool opt_sounds, opt_clock24;
 	char opt_wallpaper[256], opt_wallpaper_style[16], opt_user_picture[64], opt_keyboard[64];
+	int opt_screen_off; /* minutes idle before the screens turn off; 0 = never */
+	struct output_conf { char name[32]; int w, h, refresh_mhz; bool disabled; } out_conf[8];
+	int n_out_conf;
+	/* idle */
+	struct wl_event_source *idle_timer;
+	bool screens_off;
+	struct wlr_idle_inhibit_manager_v1 *idle_inhibit;
 	int snap_zone;
 	struct wlr_scene_rect *snap_preview;
 	double last_click_x, last_click_y;

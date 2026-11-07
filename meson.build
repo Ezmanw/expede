@@ -43,10 +43,11 @@ executable('expede',
 	install: true)
 
 executable('expede-settings',
-	'src/settings.c', 'src/theme.c', 'src/volume.c', client_protos,
+	'src/settings.c', 'src/ui.c', 'src/theme.c', 'src/volume.c', client_protos,
 	c_args: ['-DEXPEDE_CLIENT'],
 	dependencies: [
 		dependency('wayland-client'),
+		dependency('xkbcommon'),
 		dependency('cairo'),
 		dependency('pangocairo'),
 		dependency('gdk-pixbuf-2.0'),
