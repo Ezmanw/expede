@@ -104,6 +104,12 @@ struct shell {
 	struct wlr_box bat_box;      /* layout coords */
 	struct wlr_scene_buffer *batpop;
 	struct wlr_scene_rect *bright_veil;
+	bool net_open, net_up;
+	int net_sig, net_hot, n_net_aps;
+	struct { char ssid[64]; int sig; bool active, sec; } net_aps[8];
+	struct wlr_box net_icon_box; /* taskbar coords */
+	struct wlr_box net_box;      /* layout coords */
+	struct wlr_scene_buffer *netpop;
 };
 
 #define VOL_W 72
@@ -117,6 +123,8 @@ struct shell {
 #define BAT_POP_W 216
 #define BAT_SLIDER_X 36
 #define BAT_SLIDER_W 164
+#define NET_POP_W 236
+#define NET_ROW_H 26
 
 static void show(struct wlr_scene_buffer **node, struct wlr_scene_tree *parent, cairo_surface_t *s, int x, int y) {
 	scene_show(node, parent, s, x, y);
@@ -470,9 +478,64 @@ static void draw_battery(cairo_t *cr, struct shell *sh, double x, double y) {
 	}
 }
 
+static void draw_wifi_icon(cairo_t *cr, struct shell *sh, double x, double y) {
+	int bars = !sh->net_up ? 0 : sh->net_sig >= 75 ? 5 : sh->net_sig >= 55 ? 4 : sh->net_sig >= 35 ? 3 : sh->net_sig >= 15 ? 2 : 1;
+	for (int i = 0; i < 5; i++) {
+		int bh = 3 + i * 2;
+		double bx = x + 1 + i * 3, by = y + 14 - bh;
+		cairo_rectangle(cr, bx, by, 2, bh);
+		if (i < bars)
+			cairo_set_source_rgb(cr, 1, 1, 1);
+		else
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.35);
+		cairo_fill(cr);
+	}
+}
+
+static void read_net_fast(struct shell *sh) {
+	sh->net_up = false;
+	sh->net_sig = 0;
+	FILE *f = fopen("/proc/net/wireless", "r");
+	char line[256];
+	if (f) {
+		for (int n = 0; fgets(line, sizeof(line), f); n++) {
+			float link = 0;
+			if (n >= 2 && sscanf(line, " %*[^:]: %*x %f", &link) == 1 && link > 0) {
+				sh->net_up = true;
+				sh->net_sig = (int)(link * 100.0f / 70.0f + 0.5f);
+				if (sh->net_sig > 100) sh->net_sig = 100;
+				break;
+			}
+		}
+		fclose(f);
+	}
+	if (!sh->net_up) {
+		DIR *d = opendir("/sys/class/net");
+		struct dirent *e;
+		while (d && (e = readdir(d))) {
+			if (e->d_name[0] == '.' || !strcmp(e->d_name, "lo"))
+				continue;
+			char p[300], st[16] = "";
+			snprintf(p, sizeof(p), "/sys/class/net/%s/operstate", e->d_name);
+			if ((f = fopen(p, "r"))) {
+				if (!fgets(st, sizeof(st), f)) st[0] = 0;
+				fclose(f);
+			}
+			if (!strncmp(st, "up", 2)) {
+				sh->net_up = true;
+				sh->net_sig = 100;
+				break;
+			}
+		}
+		if (d)
+			closedir(d);
+	}
+}
+
 static void tick(struct shell *sh) {
 	read_battery(sh);
 	read_brightness(sh);
+	read_net_fast(sh);
 	time_t now = time(NULL);
 	struct tm tm;
 	localtime_r(&now, &tm);
@@ -518,6 +581,9 @@ static void draw_taskbar7(struct shell *sh) {
 		draw_battery(cr, sh, tx + 4, 12);
 	else
 		draw_sun(cr, tx + 4, 12, 0xffffff);
+	tx -= 24;
+	sh->net_icon_box = (struct wlr_box){tx, 8, 24, 24};
+	draw_wifi_icon(cr, sh, tx + 4, 12);
 	if (sh->vol_ok) {
 		tx -= 26;
 		sh->vol_icon_box = (struct wlr_box){tx, 8, 24, 24};
@@ -574,9 +640,9 @@ static void draw_taskbar(struct shell *sh) {
 	draw_surface(cr, t->start_flag, 7, 5);
 	draw_text(cr, "Franklin Gothic Medium, Italic 14", "start", 35, 2, 0, 0xffffff, 1, 1, 0x454c10, false);
 
-	/* tray: the speaker, brightness/battery, then the clock */
+	/* tray: the speaker, wifi, brightness/battery, then the clock */
 	int cw = text_width("Tahoma 8", sh->clock);
-	int icons_w = (sh->vol_ok ? 22 : 0) + 22;
+	int icons_w = (sh->vol_ok ? 22 : 0) + 44;
 	int trayw = cw + 19 + 14 + icons_w;
 	if (trayw < 62)
 		trayw = 62;
@@ -586,7 +652,10 @@ static void draw_taskbar(struct shell *sh) {
 		sh->vol_icon_box = (struct wlr_box){tx + 17, 5, 20, 20};
 		draw_surface(cr, (sh->vol_muted ? sh->vol_icon_muted : sh->vol_icon).s16, tx + 19, 7);
 	}
-	int bx = tx + 19 + (sh->vol_ok ? 22 : 0);
+	int nx = tx + 19 + (sh->vol_ok ? 22 : 0);
+	sh->net_icon_box = (struct wlr_box){nx - 2, 5, 20, 20};
+	draw_wifi_icon(cr, sh, nx, 7);
+	int bx = nx + 22;
 	sh->bat_icon_box = (struct wlr_box){bx - 2, 5, 20, 20};
 	if (sh->bat_pct >= 0)
 		draw_battery(cr, sh, bx, 6);
@@ -747,6 +816,118 @@ void shell_brightness_key(struct shell *sh, int step) {
 		draw_batpop(sh);
 }
 
+static void scan_net_aps(struct shell *sh) {
+	sh->n_net_aps = 0;
+	FILE *p = popen("nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list --rescan no 2>/dev/null", "r");
+	if (!p)
+		return;
+	char line[256];
+	while (sh->n_net_aps < 8 && fgets(line, sizeof(line), p)) {
+		line[strcspn(line, "\r\n")] = 0;
+		char *f[4] = {line, NULL, NULL, NULL};
+		int nf = 1;
+		for (char *c = line; *c && nf < 4; c++) {
+			if (*c == '\\' && c[1]) {
+				memmove(c, c + 1, strlen(c));
+				continue;
+			}
+			if (*c == ':') {
+				*c = 0;
+				f[nf++] = c + 1;
+			}
+		}
+		if (nf < 4 || !f[1][0])
+			continue;
+		bool dup = false;
+		for (int i = 0; i < sh->n_net_aps; i++)
+			dup |= !strcmp(sh->net_aps[i].ssid, f[1]);
+		if (dup)
+			continue;
+		int idx = sh->n_net_aps++;
+		snprintf(sh->net_aps[idx].ssid, sizeof(sh->net_aps[idx].ssid), "%s", f[1]);
+		sh->net_aps[idx].sig = atoi(f[2]);
+		sh->net_aps[idx].active = f[0][0] == '*';
+		sh->net_aps[idx].sec = f[3][0] && strcmp(f[3], "--");
+	}
+	pclose(p);
+}
+
+static int net_pop_h(struct shell *sh) {
+	int rows = sh->n_net_aps ? sh->n_net_aps : 1;
+	return 34 + rows * NET_ROW_H + 30;
+}
+
+static void draw_netpop(struct shell *sh) {
+	if (!sh->net_open) {
+		if (sh->netpop)
+			wlr_scene_node_set_enabled(&sh->netpop->node, false);
+		return;
+	}
+	bool w7 = bar7(sh);
+	struct theme *t = bar_theme(sh);
+	theme_use_fonts(t);
+	int ph = net_pop_h(sh);
+	cairo_surface_t *s = canvas_new(NET_POP_W, ph);
+	cairo_t *cr = cairo_create(s);
+	if (w7) {
+		fill(cr, 0, 0, NET_POP_W, ph, 0x556677);
+		fill(cr, 1, 1, NET_POP_W - 2, ph - 2, 0xd8e6f6);
+		fill(cr, 4, 4, NET_POP_W - 8, ph - 30, 0xffffff);
+		fill(cr, 4, ph - 26, NET_POP_W - 8, 22, 0xf1f5fb);
+		fill(cr, 4, ph - 26, NET_POP_W - 8, 1, 0xd6e5f5);
+	} else {
+		fill(cr, 0, 0, NET_POP_W, ph, 0x716f64);
+		fill(cr, 1, 1, NET_POP_W - 2, ph - 2, 0xffffff);
+		fill(cr, 2, 2, NET_POP_W - 3, ph - 3, 0xaca899);
+		fill(cr, 2, 2, NET_POP_W - 4, ph - 4, 0xece9d8);
+	}
+	draw_text(cr, "Tahoma Bold 8", sh->net_up ? "Wireless Network Connection" : "Not connected",
+		12, 10, NET_POP_W - 24, w7 ? 0x1e395b : 0x000000, 0, 0, 0, true);
+	if (!sh->n_net_aps) {
+		draw_text(cr, "Tahoma 8", sh->net_up ? "Connected" : "No wireless networks found",
+			14, 38, NET_POP_W - 28, 0x5a5a5a, 0, 0, 0, true);
+	}
+	for (int i = 0; i < sh->n_net_aps; i++) {
+		int ry = 32 + i * NET_ROW_H;
+		if (i == sh->net_hot || sh->net_aps[i].active) {
+			if (w7)
+				hl7(cr, (struct wlr_box){8, ry, NET_POP_W - 16, NET_ROW_H - 2});
+			else
+				fill(cr, 8, ry, NET_POP_W - 16, NET_ROW_H - 2, i == sh->net_hot ? 0x316ac5 : 0xd4d0c8);
+		}
+		uint32_t fg = (!w7 && i == sh->net_hot) ? 0xffffff : 0x000000;
+		draw_text(cr, sh->net_aps[i].active ? "Tahoma Bold 8" : "Tahoma 8",
+			sh->net_aps[i].ssid, 14, ry + 5, NET_POP_W - 92, fg, 0, 0, 0, true);
+		char rstr[32];
+		if (sh->net_aps[i].active)
+			snprintf(rstr, sizeof(rstr), "Connected");
+		else
+			snprintf(rstr, sizeof(rstr), "%d%%%s", sh->net_aps[i].sig, sh->net_aps[i].sec ? " *" : "");
+		int rw = text_width("Tahoma 8", rstr);
+		draw_text(cr, "Tahoma 8", rstr, NET_POP_W - 14 - rw, ry + 5, 0,
+			(!w7 && i == sh->net_hot) ? 0xffffff : 0x5a5a5a, 0, 0, 0, true);
+	}
+	draw_text(cr, "Tahoma 8", "Open Network and Sharing Center", 14, ph - 21, NET_POP_W - 24, 0x0066cc, 0, 0, 0, true);
+	cairo_destroy(cr);
+	show(&sh->netpop, sh->server->layer_menu, s, sh->net_box.x, sh->net_box.y);
+	wlr_scene_node_set_enabled(&sh->netpop->node, true);
+}
+
+static void net_set_open(struct shell *sh, bool open) {
+	sh->net_open = open;
+	sh->net_hot = -1;
+	if (sh->net_open) {
+		read_net_fast(sh);
+		scan_net_aps(sh);
+		int ph = net_pop_h(sh);
+		int x = sh->net_icon_box.x + sh->net_icon_box.width / 2 - NET_POP_W / 2;
+		if (x + NET_POP_W > sh->w - 4)
+			x = sh->w - NET_POP_W - 4;
+		sh->net_box = (struct wlr_box){x, sh->h - bar_h(sh) - ph - 2, NET_POP_W, ph};
+	}
+	draw_netpop(sh);
+}
+
 static void draw_volpop(struct shell *sh) {
 	if (!sh->vol_open) {
 		if (sh->volpop)
@@ -833,6 +1014,7 @@ static void vol_set_open(struct shell *sh, bool open) {
 	sh->vol_drag = false;
 	if (open) {
 		bat_set_open(sh, false);
+		net_set_open(sh, false);
 		vol_refresh(sh);
 		int vw = bar7(sh) ? W7_VOL_W : VOL_W, vh = bar7(sh) ? W7_VOL_H : VOL_H;
 		int x = sh->vol_icon_box.x + sh->vol_icon_box.width / 2 - vw / 2;
@@ -1463,6 +1645,15 @@ bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 		return true;
 	if (sh->bat_open && in_box(&sh->bat_box, x, y))
 		return true;
+	if (sh->net_open && in_box(&sh->net_box, x, y)) {
+		double ly = y - sh->net_box.y;
+		int hot = (ly >= 32 && ly < 32 + sh->n_net_aps * NET_ROW_H) ? (int)(ly - 32) / NET_ROW_H : -1;
+		if (hot != sh->net_hot) {
+			sh->net_hot = hot;
+			draw_netpop(sh);
+		}
+		return true;
+	}
 	if (sh->start_open) {
 		struct wlr_box mb = menu_box(sh);
 		if (sh->cascade_open && in_box(&sh->cascade_box, x, y)) {
@@ -1579,7 +1770,52 @@ bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, 
 			shell_toggle_start(sh);
 		if (sh->vol_open)
 			vol_set_open(sh, false);
+		if (sh->net_open)
+			net_set_open(sh, false);
 		bat_set_open(sh, true);
+		return true;
+	}
+	if (sh->net_open) {
+		if (in_box(&sh->net_box, x, y)) {
+			if (pressed) {
+				int ph = net_pop_h(sh);
+				double ly = y - sh->net_box.y;
+				if (ly >= ph - 26) {
+					net_set_open(sh, false);
+					spawn("expede-settings network");
+				} else if (ly >= 32 && ly < 32 + sh->n_net_aps * NET_ROW_H) {
+					int idx = (int)(ly - 32) / NET_ROW_H;
+					net_set_open(sh, false);
+					if (sh->net_aps[idx].sec && !sh->net_aps[idx].active) {
+						spawn("expede-settings network");
+					} else {
+						char cmd[256], q[160];
+						size_t o = 0;
+						q[o++] = '\'';
+						for (const char *s = sh->net_aps[idx].ssid; *s && o + 5 < sizeof(q); s++)
+							if (*s == '\'') { memcpy(q + o, "'\\''", 4); o += 4; }
+							else q[o++] = *s;
+						q[o++] = '\'';
+						q[o] = 0;
+						snprintf(cmd, sizeof(cmd), "nmcli dev wifi connect %s >/dev/null 2>&1 || expede-settings network", q);
+						spawn(cmd);
+					}
+				}
+			}
+			return true;
+		}
+		if (pressed)
+			net_set_open(sh, false);
+		if (on_bar && in_box(&sh->net_icon_box, x, y - (sh->h - bar_h(sh))))
+			return true;
+	} else if (pressed && on_bar && in_box(&sh->net_icon_box, x, y - (sh->h - bar_h(sh)))) {
+		if (sh->start_open)
+			shell_toggle_start(sh);
+		if (sh->vol_open)
+			vol_set_open(sh, false);
+		if (sh->bat_open)
+			bat_set_open(sh, false);
+		net_set_open(sh, true);
 		return true;
 	}
 	if (sh->vol_open || sh->vol_drag) {
