@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,9 +32,10 @@ static struct icon_set *icon(const char *name);
 /* ================================================================== options */
 
 struct config {
-	bool snap, tap, natural, sounds, clock24;
-	int scale_pct, speed, screen_off;
+	bool snap, tap, natural, sounds, clock24, glass;
+	int scale_pct, speed, screen_off, glass_intensity;
 	char wallpaper[256], wall_style[16], picture[64], keyboard[64];
+	char style[16], glass_color[32], frames[16], taskbar[16], start_menu[16], logon[16], sound_scheme[16], pointers[16], icons[16];
 	struct { char name[32], mode[32]; bool disabled; } out[8];
 	int n_out;
 };
@@ -63,10 +65,20 @@ static int out_index(const char *name, bool create) {
 
 static void config_load(void) {
 	memset(&cfg, 0, sizeof(cfg)); /* zeroed padding keeps the memcmp() "changed?" test honest */
-	cfg.tap = cfg.natural = cfg.sounds = true;
+	cfg.tap = cfg.natural = cfg.sounds = cfg.glass = true;
 	cfg.screen_off = 10;
+	cfg.glass_intensity = 45;
 	snprintf(cfg.wallpaper, sizeof(cfg.wallpaper), "Bliss.jpg");
 	snprintf(cfg.wall_style, sizeof(cfg.wall_style), "auto");
+	snprintf(cfg.style, sizeof(cfg.style), "xp");
+	snprintf(cfg.glass_color, sizeof(cfg.glass_color), "sky");
+	snprintf(cfg.frames, sizeof(cfg.frames), "auto");
+	snprintf(cfg.taskbar, sizeof(cfg.taskbar), "auto");
+	snprintf(cfg.start_menu, sizeof(cfg.start_menu), "auto");
+	snprintf(cfg.logon, sizeof(cfg.logon), "auto");
+	snprintf(cfg.sound_scheme, sizeof(cfg.sound_scheme), "auto");
+	snprintf(cfg.pointers, sizeof(cfg.pointers), "auto");
+	snprintf(cfg.icons, sizeof(cfg.icons), "auto");
 	char path[512], line[512], key[96], val[256];
 	conf_path(path, sizeof(path));
 	FILE *f = fopen(path, "r");
@@ -93,6 +105,17 @@ static void config_load(void) {
 		else if (!strcmp(key, "wallpaper_style")) snprintf(cfg.wall_style, sizeof(cfg.wall_style), "%s", val);
 		else if (!strcmp(key, "user_picture")) snprintf(cfg.picture, sizeof(cfg.picture), "%s", val);
 		else if (!strcmp(key, "keyboard_layout")) snprintf(cfg.keyboard, sizeof(cfg.keyboard), "%s", val);
+		else if (!strcmp(key, "style")) snprintf(cfg.style, sizeof(cfg.style), "%s", val);
+		else if (!strcmp(key, "glass")) cfg.glass = truthy(val);
+		else if (!strcmp(key, "glass_color")) snprintf(cfg.glass_color, sizeof(cfg.glass_color), "%s", val);
+		else if (!strcmp(key, "glass_intensity")) cfg.glass_intensity = atoi(val) < 0 ? 0 : atoi(val) > 100 ? 100 : atoi(val);
+		else if (!strcmp(key, "frames")) snprintf(cfg.frames, sizeof(cfg.frames), "%s", val);
+		else if (!strcmp(key, "taskbar")) snprintf(cfg.taskbar, sizeof(cfg.taskbar), "%s", val);
+		else if (!strcmp(key, "start_menu")) snprintf(cfg.start_menu, sizeof(cfg.start_menu), "%s", val);
+		else if (!strcmp(key, "logon")) snprintf(cfg.logon, sizeof(cfg.logon), "%s", val);
+		else if (!strcmp(key, "sound_scheme")) snprintf(cfg.sound_scheme, sizeof(cfg.sound_scheme), "%s", val);
+		else if (!strcmp(key, "pointers")) snprintf(cfg.pointers, sizeof(cfg.pointers), "%s", val);
+		else if (!strcmp(key, "icons")) snprintf(cfg.icons, sizeof(cfg.icons), "%s", val);
 		else if (!strncmp(key, "output.", 7) && strrchr(key, '.') > key + 7) {
 			const char *dot = strrchr(key, '.');
 			char name[32];
@@ -122,6 +145,17 @@ static void config_save(void) {
 		return;
 	}
 	fprintf(f, "# Expede settings (written by the Control Panel)\n");
+	fprintf(f, "style = %s\n", cfg.style);
+	fprintf(f, "glass = %s\n", cfg.glass ? "true" : "false");
+	fprintf(f, "glass_color = %s\n", cfg.glass_color);
+	fprintf(f, "glass_intensity = %d\n", cfg.glass_intensity);
+	if (strcmp(cfg.frames, "auto")) fprintf(f, "frames = %s\n", cfg.frames);
+	if (strcmp(cfg.taskbar, "auto")) fprintf(f, "taskbar = %s\n", cfg.taskbar);
+	if (strcmp(cfg.start_menu, "auto")) fprintf(f, "start_menu = %s\n", cfg.start_menu);
+	if (strcmp(cfg.logon, "auto")) fprintf(f, "logon = %s\n", cfg.logon);
+	if (strcmp(cfg.sound_scheme, "auto")) fprintf(f, "sound_scheme = %s\n", cfg.sound_scheme);
+	if (strcmp(cfg.pointers, "auto")) fprintf(f, "pointers = %s\n", cfg.pointers);
+	if (strcmp(cfg.icons, "auto")) fprintf(f, "icons = %s\n", cfg.icons);
 	fprintf(f, "snap = %s\n", cfg.snap ? "true" : "false");
 	fprintf(f, "tap_to_click = %s\n", cfg.tap ? "true" : "false");
 	fprintf(f, "natural_scroll = %s\n", cfg.natural ? "true" : "false");
@@ -500,6 +534,28 @@ static void progs_refresh(void) {
 	qsort(progs, n_progs, sizeof(*progs), by_name);
 }
 
+static cairo_surface_t *load_small_icon(const char *path) {
+	GdkPixbuf *pb = gdk_pixbuf_new_from_file_at_size(path, 24, 24, NULL);
+	if (!pb)
+		return NULL;
+	int w = gdk_pixbuf_get_width(pb), h = gdk_pixbuf_get_height(pb);
+	int n = gdk_pixbuf_get_n_channels(pb), rs = gdk_pixbuf_get_rowstride(pb);
+	bool alpha = gdk_pixbuf_get_has_alpha(pb);
+	const guchar *src = gdk_pixbuf_read_pixels(pb);
+	cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+	unsigned char *dst = cairo_image_surface_get_data(s);
+	int ds = cairo_image_surface_get_stride(s);
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++) {
+			const guchar *p = src + y * rs + x * n;
+			unsigned a = alpha ? p[3] : 255;
+			((uint32_t *)(dst + y * ds))[x] = a << 24 | (p[0] * a / 255) << 16 | (p[1] * a / 255) << 8 | (p[2] * a / 255);
+		}
+	cairo_surface_mark_dirty(s);
+	g_object_unref(pb);
+	return s;
+}
+
 static cairo_surface_t *prog_icon(struct prog *p) {
 	if (p->icon_tried)
 		return p->icon;
@@ -507,7 +563,7 @@ static cairo_surface_t *prog_icon(struct prog *p) {
 	if (!p->icon_name)
 		return NULL;
 	if (p->icon_name[0] == '/')
-		return p->icon = theme_load_image(p->icon_name);
+		return p->icon = load_small_icon(p->icon_name);
 	static const char *dirs[] = {"/usr/share/icons/hicolor/32x32/apps", "/usr/share/icons/hicolor/48x48/apps",
 		"/usr/share/icons/hicolor/scalable/apps", "/usr/share/icons/hicolor/64x64/apps", "/usr/share/pixmaps"};
 	static const char *exts[] = {"png", "svg", "xpm"};
@@ -516,7 +572,7 @@ static cairo_surface_t *prog_icon(struct prog *p) {
 		for (size_t x = 0; x < 3 && !p->icon; x++) {
 			snprintf(path, sizeof(path), "%s/%s.%s", dirs[d], p->icon_name, exts[x]);
 			if (access(path, R_OK) == 0)
-				p->icon = theme_load_image(path);
+				p->icon = load_small_icon(path);
 		}
 	return p->icon;
 }
@@ -728,7 +784,8 @@ enum {
 	ID_TEST_SOUND, ID_CLOCK12, ID_CLOCK24, ID_STRETCH, ID_CENTER, ID_TILE, ID_WIFI_ON, ID_WIFI_REFRESH,
 	ID_WIFI_CONNECT, ID_WIFI_DISCONNECT, ID_WIFI_PW, ID_BT_POWER, ID_BT_SCAN, ID_BT_CONNECT, ID_BT_DISCONNECT,
 	ID_BT_REMOVE, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_REMOVE_PROG,
-	ID_ADD_PROGS, ID_SET_ZONE, ID_XP_STYLE,
+	ID_CHANGE_PROGS, ID_ADD_PROGS, ID_SEARCH_PKGS, ID_INSTALL_PKG, ID_PKG_TERM, ID_PKG_QUERY,
+	ID_SET_ZONE, ID_XP_STYLE, ID_START_XP, ID_START_SEARCH, ID_START_W7,
 	ID_TAB = 50,          /* + tab */
 	ID_SCALE = 60,        /* + 0..5 */
 	ID_SCREEN_OFF = 70,   /* + choice */
@@ -996,9 +1053,16 @@ static void paint_taskbar(struct sheet *s, cairo_t *cr) {
 		ui_group(cr, 16, 136, SHEET_W - 32, 64, "Notification area");
 		hint(cr, 30, 160, "Shows the volume icon and the clock. Set the clock\nformat in Date and Time.");
 	} else {
-		ui_group(cr, 16, 40, SHEET_W - 32, 84, "Start menu style");
-		ui_check(w, cr, ID_XP_STYLE, 28, 64, true, true, "Start menu (Windows XP)");
+		bool is_w7 = !strcasecmp(cfg.start_menu, "7") || (!strcasecmp(cfg.start_menu, "auto") && !strcasecmp(cfg.style, "7"));
+		bool is_search = !strcasecmp(cfg.start_menu, "modern") || !strcasecmp(cfg.start_menu, "search");
+		bool is_xp = !is_w7 && !is_search;
+		ui_group(cr, 16, 40, SHEET_W - 32, 180, "Start menu style");
+		ui_check(w, cr, ID_START_XP, 28, 64, is_xp, true, "Start menu (Windows XP)");
 		hint(cr, 47, 84, "All Programs opens XP's cascading list of every app.");
+		ui_check(w, cr, ID_START_SEARCH, 28, 110, is_search, true, "Start menu with search (Windows XP)");
+		hint(cr, 47, 130, "Start typing as soon as the menu opens; All Programs scrolls in place.");
+		ui_check(w, cr, ID_START_W7, 28, 156, is_w7, true, "Start menu (Windows 7)");
+		hint(cr, 47, 176, "White program list, glass places column, and Search programs and files.");
 	}
 }
 
@@ -1078,30 +1142,82 @@ static void paint_network(struct sheet *s, cairo_t *cr) {
 static const char *prog_label(int i) { return progs[i].name; }
 static cairo_surface_t *prog_icon_at(int i) { return prog_icon(&progs[i]); }
 
+struct pkg_hit { char name[64], desc[160], label[232]; };
+static struct pkg_hit pkg_hits[200];
+static int n_pkg_hits, pkg_sel = -1, pkg_caret;
+static char pkg_query[128];
+
+static const char *pkg_label(int i) { return pkg_hits[i].label; }
+
+static void pkg_search(void) {
+	n_pkg_hits = 0;
+	pkg_sel = -1;
+	if (!pkg_query[0])
+		return;
+	char q[300], cmd[512];
+	snprintf(cmd, sizeof(cmd), "apt-cache search --names-only %s | sort | head -n 200", ui_shell_quote(pkg_query, q, sizeof(q)));
+	char *out = capture(cmd), *save;
+	for (char *line = strtok_r(out, "\n", &save); line && n_pkg_hits < 200; line = strtok_r(NULL, "\n", &save)) {
+		char *sep = strstr(line, " - ");
+		if (!sep)
+			continue;
+		*sep = 0;
+		struct pkg_hit *h = &pkg_hits[n_pkg_hits++];
+		snprintf(h->name, sizeof(h->name), "%s", line);
+		snprintf(h->desc, sizeof(h->desc), "%s", sep + 3);
+		snprintf(h->label, sizeof(h->label), "%s  —  %s", line, sep + 3);
+	}
+	free(out);
+	if (n_pkg_hits)
+		pkg_sel = 0;
+}
+
+static void pkg_install(void) {
+	if (pkg_sel < 0 || pkg_sel >= n_pkg_hits)
+		return;
+	char q[160], cmd[512];
+	ui_shell_quote(pkg_hits[pkg_sel].name, q, sizeof(q));
+	snprintf(cmd, sizeof(cmd), "foot -T 'Add New Programs' sh -c \"sudo apt install %s; echo; read -p 'Press Enter to close.' x\"", q);
+	spawn(cmd);
+}
+
 static void paint_programs(struct sheet *s, cairo_t *cr) {
 	struct ui_win *w = s->win;
 	ui_fill(cr, 0, 0, w->w, w->h, 0xece9d8);
 	/* XP's bar of big buttons down the left */
 	ui_fill(cr, 0, 0, 96, w->h, 0x7a96df);
 	static const struct { int id; const char *label, *icon; } side[] = {
-		{0, "Change or\nRemove\nPrograms", "cp-programs"}, {ID_ADD_PROGS, "Add New\nPrograms", "cp-programs"},
+		{ID_CHANGE_PROGS, "Change or\nRemove\nPrograms", "cp-programs"}, {ID_ADD_PROGS, "Add New\nPrograms", "cp-programs"},
 		{ID_APPLET + K_DEFAULTS, "Set Program\nAccess and\nDefaults", "cp-system"},
 	};
 	for (int i = 0; i < 3; i++) {
 		int y = 10 + i * 96;
-		bool cur = i == 0, hot = side[i].id && w->hot == side[i].id;
+		bool cur = (i == 0 && s->tab == 0) || (i == 1 && s->tab == 1), hot = w->hot == side[i].id;
 		if (cur || hot)
 			ui_fill(cr, 4, y, 88, 88, cur ? 0x9db2ec : 0x8aa5e8);
 		ui_icon(cr, icon(side[i].icon)->s32, 32, y + 6, 32);
 		draw_label(cr, "Tahoma 8", side[i].label, 48, y + 42, 86, 0xffffff, 0x000000, -1);
-		if (side[i].id)
-			ui_reg(w, side[i].id, 4, y, 88, 88);
+		ui_reg(w, side[i].id, 4, y, 88, 88);
 	}
-	ui_text(cr, "Tahoma Bold 8", "Currently installed programs:", 108, 12, 0, 0x000000);
-	listbox(w, cr, ID_LIST, 106, 32, w->w - 118, w->h - 124, n_progs, prog_sel, &s->scroll, &s->list_box, prog_label, prog_icon_at, 24);
-	if (prog_sel >= 0 && prog_sel < n_progs) {
-		ui_text(cr, "Tahoma 8", "To remove this program from your computer, click Remove.", 108, w->h - 82, w->w - 210, 0x000000);
-		ui_button(w, cr, ID_REMOVE_PROG, w->w - 92, w->h - 86, 80, "Remove", false, true);
+	if (s->tab == 1) {
+		ui_text(cr, "Tahoma Bold 8", "Add a program from Debian:", 108, 12, 0, 0x000000);
+		ui_field(w, cr, ID_PKG_QUERY, 106, 32, w->w - 286, 22, pkg_query, true, pkg_caret);
+		ui_button(w, cr, ID_SEARCH_PKGS, w->w - 172, 31, 74, "Search", false, true);
+		ui_button(w, cr, ID_PKG_TERM, w->w - 92, 31, 80, "Terminal...", false, false);
+		listbox(w, cr, ID_LIST, 106, 62, w->w - 118, w->h - 154, n_pkg_hits, pkg_sel, &s->scroll, &s->list_box, pkg_label, NULL, 20);
+		if (!n_pkg_hits)
+			hint(cr, 116, 74, "Type a program or package name above and click Search (or press Enter).");
+		if (pkg_sel >= 0 && pkg_sel < n_pkg_hits) {
+			ui_text(cr, "Tahoma 8", "To install this program on your computer, click Add.", 108, w->h - 82, w->w - 210, 0x000000);
+			ui_button(w, cr, ID_INSTALL_PKG, w->w - 92, w->h - 86, 80, "Add", false, false);
+		}
+	} else {
+		ui_text(cr, "Tahoma Bold 8", "Currently installed programs:", 108, 12, 0, 0x000000);
+		listbox(w, cr, ID_LIST, 106, 32, w->w - 118, w->h - 124, n_progs, prog_sel, &s->scroll, &s->list_box, prog_label, prog_icon_at, 24);
+		if (prog_sel >= 0 && prog_sel < n_progs) {
+			ui_text(cr, "Tahoma 8", "To remove this program from your computer, click Remove.", 108, w->h - 82, w->w - 210, 0x000000);
+			ui_button(w, cr, ID_REMOVE_PROG, w->w - 92, w->h - 86, 80, "Remove", false, true);
+		}
 	}
 	ui_button(w, cr, ID_CANCEL, w->w - 87, w->h - 36, 75, "Close", false, false);
 }
@@ -1499,11 +1615,17 @@ static void list_pick(struct sheet *s, int i, bool second, int clicks) {
 		net_message[0] = 0;
 		break;
 	case K_PROGRAMS:
-		prog_sel = i;
-		if (clicks == 2 && progs[i].exec) {
-			char cmd[1024];
-			exec_line(progs[i].exec, cmd, sizeof(cmd));
-			spawn(cmd);
+		if (s->tab == 1) {
+			pkg_sel = i;
+			if (clicks == 2)
+				pkg_install();
+		} else {
+			prog_sel = i;
+			if (clicks == 2 && progs[i].exec) {
+				char cmd[1024];
+				exec_line(progs[i].exec, cmd, sizeof(cmd));
+				spawn(cmd);
+			}
 		}
 		break;
 	case K_DEFAULTS:
@@ -1616,6 +1738,9 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 	}
 	switch (id) {
 	case ID_SNAP: cfg.snap = !cfg.snap; break;
+	case ID_START_XP: snprintf(cfg.start_menu, sizeof(cfg.start_menu), "xp"); break;
+	case ID_START_SEARCH: snprintf(cfg.start_menu, sizeof(cfg.start_menu), "modern"); break;
+	case ID_START_W7: snprintf(cfg.start_menu, sizeof(cfg.start_menu), "7"); break;
 	case ID_TAP: cfg.tap = !cfg.tap; break;
 	case ID_NATURAL: cfg.natural = !cfg.natural; break;
 	case ID_SCHEME_DEFAULT: cfg.sounds = true; break;
@@ -1694,10 +1819,24 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 			spawn(cmd);
 		}
 		break;
+	case ID_CHANGE_PROGS:
+		s->tab = 0;
+		s->scroll = 0;
+		progs_refresh();
+		break;
 	case ID_ADD_PROGS:
-		if (have("gnome-software")) spawn("gnome-software");
-		else if (have("plasma-discover")) spawn("plasma-discover");
-		else spawn("foot -T 'Add New Programs' sh -c \"echo 'Install programs with:  sudo apt install <name>'; echo; exec bash\"");
+		s->tab = 1;
+		s->scroll = 0;
+		break;
+	case ID_SEARCH_PKGS:
+		s->scroll = 0;
+		pkg_search();
+		break;
+	case ID_INSTALL_PKG:
+		pkg_install();
+		break;
+	case ID_PKG_TERM:
+		spawn("foot -T 'Add New Programs' sh -c \"echo 'Install programs with:  sudo apt install <name>'; echo; exec bash\"");
 		break;
 	case ID_APPLY: config_save(); break;
 	case ID_OK:
@@ -1753,6 +1892,15 @@ static void sheet_key(struct ui_win *w, xkb_keysym_t sym, const char *utf8, int 
 	struct sheet *s = w->data;
 	if (sym == XKB_KEY_Escape) {
 		close_sheet(s, !is_live(s->kind));
+		return;
+	}
+	if (s->kind == K_PROGRAMS && s->tab == 1) {
+		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			s->scroll = 0;
+			pkg_search();
+		} else {
+			ui_edit(pkg_query, sizeof(pkg_query), &pkg_caret, sym, utf8, mods);
+		}
 		return;
 	}
 	if (s->kind == K_NETWORK && s->tab == 0 && wifi_sel >= 0) {

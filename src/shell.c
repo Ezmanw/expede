@@ -627,14 +627,15 @@ void shell_volume_key(struct shell *sh, int step, bool toggle_mute) {
 
 /* ---------------------------------------------------------------- start menu */
 
-static void add_item(struct shell *sh, enum item_kind kind, const char *label, const char *icon, const char *cmd) {
+static void add_item(struct shell *sh, enum item_kind kind, const char *label, const char *label7, const char *icon, const char *cmd) {
 	struct menu_item *m = &sh->items[sh->n_items++];
 	m->kind = kind;
 	m->label = label;
+	m->label7 = label7;
 	m->icon = icon;
 	m->cmd = cmd;
 	if (icon)
-		m->img = theme_icon(&sh->server->theme, icon);
+		m->img = theme_icon(menu_theme(sh), icon);
 }
 
 static int bottom_band(struct shell *sh) {
@@ -643,11 +644,15 @@ static int bottom_band(struct shell *sh) {
 
 /* menu-relative area the modern app list fills */
 static struct wlr_box list_box(struct shell *sh) {
+	if (menu7(sh))
+		return (struct wlr_box){11, 12, W7_LEFT_W - 22, W7_MENU_H - 96};
 	int top = USER_H + 6;
 	return (struct wlr_box){6, top, COL_W - 15, sh->menu_h - LOGOFF_H - bottom_band(sh) - top - 2};
 }
 
 static struct wlr_box search_box(struct shell *sh) {
+	if (menu7(sh))
+		return (struct wlr_box){14, W7_MENU_H - 42, W7_LEFT_W - 28, 26};
 	return (struct wlr_box){8, sh->menu_h - LOGOFF_H - SEARCH_H + 4, COL_W - 17, 22};
 }
 
@@ -670,6 +675,44 @@ static void update_results(struct shell *sh) {
 }
 
 static void layout_menu(struct shell *sh) {
+	if (menu7(sh)) {
+		int ly = 12, ry = 54, rw = W7_MENU_W - W7_LEFT_W - 14;
+		for (int i = 0; i < sh->n_items; i++) {
+			struct menu_item *m = &sh->items[i];
+			if (!m->label7) {
+				m->box = (struct wlr_box){0};
+				continue;
+			}
+			switch (m->kind) {
+			case ITEM_PINNED: case ITEM_MFU:
+				m->box = (struct wlr_box){11, ly, W7_LEFT_W - 22, 36};
+				ly += 36;
+				break;
+			case ITEM_SEP_LEFT:
+				m->box = (struct wlr_box){14, ly, W7_LEFT_W - 28, 9};
+				ly += 9;
+				break;
+			case ITEM_PLACE_BOLD: case ITEM_PLACE:
+				m->box = (struct wlr_box){W7_LEFT_W + 6, ry, rw, 28};
+				ry += 28;
+				break;
+			case ITEM_SEP_RIGHT:
+				m->box = (struct wlr_box){W7_LEFT_W + 10, ry, rw - 8, 9};
+				ry += 9;
+				break;
+			case ITEM_ALL_PROGRAMS:
+				m->box = (struct wlr_box){11, W7_MENU_H - 78, W7_LEFT_W - 22, 24};
+				break;
+			case ITEM_TURNOFF:
+				m->box = (struct wlr_box){W7_LEFT_W + 10, W7_MENU_H - 38, 86, 24};
+				break;
+			case ITEM_LOGOFF:
+				m->box = (struct wlr_box){W7_LEFT_W + 96, W7_MENU_H - 38, 23, 24};
+				break;
+			}
+		}
+		return;
+	}
 	int ly = USER_H + 6, ry = USER_H + 8;
 	int mh = sh->menu_h;
 	for (int i = 0; i < sh->n_items; i++) {
@@ -707,6 +750,8 @@ static void layout_menu(struct shell *sh) {
 static bool item_shown(struct shell *sh, struct menu_item *m) {
 	if (m->kind == ITEM_SEP_LEFT || m->kind == ITEM_SEP_RIGHT)
 		return false;
+	if (menu7(sh) && !m->label7)
+		return false;
 	if (list_mode(sh) && (m->kind == ITEM_PINNED || m->kind == ITEM_MFU))
 		return false;
 	return true;
@@ -718,7 +763,8 @@ static void draw_logoff_glyph(cairo_t *cr, cairo_surface_t *s, int frame, double
 }
 
 static void draw_app_list(struct shell *sh, cairo_t *cr) {
-	struct theme *t = &sh->server->theme;
+	struct theme *t = menu_theme(sh);
+	bool w7 = menu7(sh);
 	struct wlr_box lb = list_box(sh);
 	int n;
 	struct app *apps = apps_all(&n);
@@ -727,42 +773,193 @@ static void draw_app_list(struct shell *sh, cairo_t *cr) {
 	cairo_clip(cr);
 	if (!sh->n_results)
 		draw_text(cr, "Tahoma 8", "No items match your search.", lb.x + 8, lb.y + 8, lb.width - 12,
-			0x808080, 0, 0, 0, true);
+			0x808080, 0, 0, 0, !w7);
 	int rows = lb.height / ROW_H;
 	for (int r = 0; r < rows + 1 && sh->scroll + r < sh->n_results; r++) {
 		int idx = sh->scroll + r;
 		struct app *a = &apps[sh->results[idx]];
 		int y = lb.y + r * ROW_H;
 		bool hl = idx == sh->list_hot || (sh->list_hot < 0 && idx == sh->list_sel);
-		if (hl)
-			fill(cr, lb.x, y, lb.width, ROW_H, 0x3070d0);
+		if (hl) {
+			if (w7)
+				hl7(cr, (struct wlr_box){lb.x, y, lb.width - (sh->n_results > rows ? 6 : 0), ROW_H});
+			else
+				fill(cr, lb.x, y, lb.width, ROW_H, 0x3070d0);
+		}
 		draw_scaled(cr, app_icon(t, a), lb.x + 4, y + 2, 20);
-		draw_text(cr, "Tahoma 8", a->name, lb.x + 30, y + 5, lb.width - 34, hl ? 0xffffff : 0x373738, 0, 0, 0, true);
+		draw_text(cr, "Tahoma 8", a->name, lb.x + 30, y + 4, lb.width - 34,
+			hl && !w7 ? 0xffffff : 0x282828, 0, 0, 0, !w7);
 	}
 	cairo_restore(cr);
-	/* scroll hint: a thin XP-blue bar on the right edge */
+	/* scroll hint: a thin bar on the right edge */
 	if (sh->n_results > rows && rows > 0) {
 		double frac = (double)rows / sh->n_results, pos = (double)sh->scroll / sh->n_results;
-		fill(cr, lb.x + lb.width - 4, lb.y + pos * lb.height, 3, frac * lb.height, 0x7ba2e7);
+		fill(cr, lb.x + lb.width - 4, lb.y + pos * lb.height, 3, frac * lb.height, w7 ? 0xa5b9d1 : 0x7ba2e7);
 	}
 }
 
 static void draw_search(struct shell *sh, cairo_t *cr) {
+	bool w7 = menu7(sh);
 	struct wlr_box b = search_box(sh);
-	/* XP text field: white with the Luna blue-grey outline */
-	fill(cr, b.x, b.y, b.width, b.height, 0x7f9db9);
+	fill(cr, b.x, b.y, b.width, b.height, w7 ? 0x5794bf : 0x7f9db9);
 	fill(cr, b.x + 1, b.y + 1, b.width - 2, b.height - 2, 0xffffff);
+	int ty = b.y + (b.height - 15) / 2;
 	if (sh->query[0]) {
-		int w = draw_text(cr, "Tahoma 8", sh->query, b.x + 5, b.y + 4, b.width - 12, 0x000000, 0, 0, 0, true);
-		fill(cr, b.x + 6 + (w < b.width - 12 ? w : b.width - 12), b.y + 4, 1, 13, 0x000000);
+		int w = draw_text(cr, "Tahoma 8", sh->query, b.x + 6, ty, b.width - (w7 ? 28 : 12), 0x000000, 0, 0, 0, !w7);
+		int maxw = b.width - (w7 ? 28 : 12);
+		fill(cr, b.x + 7 + (w < maxw ? w : maxw), ty + 1, 1, 13, 0x000000);
 	} else {
-		draw_text(cr, "Tahoma, Italic 8", "Start Search", b.x + 5, b.y + 4, 0, 0x8d8d8d, 0, 0, 0, true);
-		fill(cr, b.x + 4, b.y + 4, 1, 13, 0x000000);
+		const char *ph = w7 ? "Search programs and files" : "Start Search";
+		draw_text(cr, "Tahoma, Italic 8", ph, b.x + 6, ty, 0, 0x6d6d6d, 0, 0, 0, !w7);
+		fill(cr, b.x + 5, ty + 1, 1, 13, 0x000000);
+	}
+	if (w7) {
+		struct icon_set ic = theme_icon(menu_theme(sh), "search");
+		if (ic.s16) {
+			draw_surface(cr, ic.s16, b.x + b.width - 20, b.y + (b.height - 16) / 2);
+			cairo_surface_destroy(ic.s16);
+		}
+		if (ic.s32)
+			cairo_surface_destroy(ic.s32);
+	}
+}
+
+/* Windows 7's Aero Start menu: white program list and search box on the left,
+ * glass places column on the right with the framed user picture rising above */
+static void draw_menu7(struct shell *sh) {
+	struct server *srv = sh->server;
+	struct theme *t = menu_theme(sh);
+	theme_use_fonts(t);
+	int bh = bar_h(sh), mh = W7_MENU_H;
+	cairo_surface_t *s = canvas_new(W7_MENU_W, mh + W7_PIC_OVER);
+	cairo_t *cr = cairo_create(s);
+	cairo_translate(cr, 0, W7_PIC_OVER);
+
+	/* outer Aero glass frame + right column tint */
+	draw_glass(srv, cr, 0, 0, W7_MENU_W, mh, 6, 0, true);
+	cairo_save(cr);
+	cairo_rectangle(cr, W7_LEFT_W, 2, W7_MENU_W - W7_LEFT_W - 2, mh - 4);
+	cairo_clip(cr);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.25);
+	cairo_paint(cr);
+	cairo_restore(cr);
+
+	/* white left pane: program list, All Programs row, and search tray */
+	int lx = 7, ly = 7, lw = W7_LEFT_W - 7, lh = mh - 14;
+	fill(cr, lx, ly, lw, lh, 0x7f9db9);
+	fill(cr, lx + 1, ly + 1, lw - 2, lh - 2, 0xffffff);
+	draw_image(cr, &t->w7_sp_progs, 0, lx + 1, ly + 1, lw - 2, lh - 46);
+	fill(cr, lx + 6, mh - 81, lw - 12, 1, 0xd6e0ec);
+	fill(cr, lx + 1, mh - 50, lw - 2, 1, 0xc3d2e4);
+	fill(cr, lx + 1, mh - 49, lw - 2, 41, 0xf1f5fb);
+
+	if (list_mode(sh))
+		draw_app_list(sh, cr);
+	draw_search(sh, cr);
+
+	/* user picture rising above the right column in its glass frame */
+	int ux = W7_LEFT_W + (W7_MENU_W - W7_LEFT_W - 64) / 2, uy = -W7_PIC_OVER;
+	if (t->user_pic)
+		draw_scaled(cr, t->user_pic, ux + 8, uy + 8, 48);
+	draw_surface(cr, t->w7_userframe, ux, uy);
+
+	for (int i = 0; i < sh->n_items; i++) {
+		struct menu_item *m = &sh->items[i];
+		if (!m->label7)
+			continue;
+		struct wlr_box b = m->box;
+		bool hot = i == sh->menu_hot;
+		if (list_mode(sh) && (m->kind == ITEM_PINNED || m->kind == ITEM_MFU || m->kind == ITEM_SEP_LEFT))
+			continue;
+		switch (m->kind) {
+		case ITEM_PINNED: case ITEM_MFU:
+			if (hot)
+				hl7(cr, b);
+			draw_surface(cr, m->img.s32, b.x + 4, b.y + 2);
+			draw_text(cr, "Segoe UI 9", m->label7, b.x + 42, b.y + 10, b.width - 44, 0x282828, 0, 0, 0, false);
+			break;
+		case ITEM_SEP_LEFT:
+			fill(cr, b.x, b.y + 4, b.width, 1, 0xdbe3ed);
+			break;
+		case ITEM_SEP_RIGHT:
+			cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
+			cairo_rectangle(cr, b.x, b.y + 3, b.width, 1);
+			cairo_fill(cr);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.2);
+			cairo_rectangle(cr, b.x, b.y + 4, b.width, 1);
+			cairo_fill(cr);
+			break;
+		case ITEM_PLACE_BOLD: case ITEM_PLACE:
+			if (hot)
+				glass_hl(cr, b);
+			draw_text(cr, "Segoe UI 9", m->label7, b.x + 10, b.y + 6, b.width - 14, 0xffffff, 1, 1, 0x000000, false);
+			break;
+		case ITEM_ALL_PROGRAMS: {
+			if (hot)
+				hl7(cr, b);
+			bool back = list_mode(sh);
+			const char *label = back ? "Back" : m->label7;
+			/* small triangle pointing right for All Programs, left for Back */
+			double ax = b.x + 8, ay = b.y + b.height / 2.0;
+			cairo_save(cr);
+			cairo_set_source_rgb(cr, 0.16, 0.24, 0.36);
+			if (back) {
+				cairo_move_to(cr, ax + 5, ay - 4);
+				cairo_line_to(cr, ax, ay);
+				cairo_line_to(cr, ax + 5, ay + 4);
+			} else {
+				cairo_move_to(cr, ax, ay - 4);
+				cairo_line_to(cr, ax + 5, ay);
+				cairo_line_to(cr, ax, ay + 4);
+			}
+			cairo_close_path(cr);
+			cairo_fill(cr);
+			cairo_restore(cr);
+			draw_text(cr, "Segoe UI 9", label, b.x + 24, b.y + 4, b.width - 28, 0x282828, 0, 0, 0, false);
+			break;
+		}
+		case ITEM_TURNOFF: {
+			draw_image(cr, &t->w7_sp_shutdown, hot ? 1 : 0, b.x, b.y, b.width, b.height);
+			int tw = text_width("Segoe UI 9", m->label7);
+			draw_text(cr, "Segoe UI 9", m->label7, b.x + (b.width - tw) / 2, b.y + 4, 0, 0xffffff, 1, 1, 0x000000, false);
+			break;
+		}
+		case ITEM_LOGOFF: {
+			draw_image(cr, &t->w7_sp_shutdown_arrow, hot ? 1 : 0, b.x, b.y, b.width, b.height);
+			double ax = b.x + 9, ay = b.y + b.height / 2.0;
+			cairo_save(cr);
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_move_to(cr, ax, ay - 3.5);
+			cairo_line_to(cr, ax + 4, ay);
+			cairo_line_to(cr, ax, ay + 3.5);
+			cairo_close_path(cr);
+			cairo_fill(cr);
+			cairo_restore(cr);
+			break;
+		}
+		}
+	}
+	cairo_destroy(cr);
+	show(&sh->menu, srv->layer_menu, s, 0, sh->h - bh - mh - W7_PIC_OVER);
+	wlr_scene_node_set_enabled(&sh->menu->node, sh->start_open);
+	if (sh->start_open) {
+		glass_backdrop(srv, &sh->menu_glass, srv->layer_menu, 0, sh->h - bh - mh, 0, sh->h - bh - mh, W7_MENU_W, mh);
+		if (sh->menu_glass)
+			wlr_scene_node_place_below(&sh->menu_glass->node, &sh->menu->node);
+	} else if (sh->menu_glass) {
+		wlr_scene_node_set_enabled(&sh->menu_glass->node, false);
 	}
 }
 
 static void draw_menu(struct shell *sh) {
-	struct theme *t = &sh->server->theme;
+	if (menu7(sh)) {
+		draw_menu7(sh);
+		return;
+	}
+	if (sh->menu_glass)
+		wlr_scene_node_set_enabled(&sh->menu_glass->node, false);
+	struct theme *t = menu_theme(sh);
+	theme_use_fonts(t);
 	int mh = sh->menu_h;
 	cairo_surface_t *s = canvas_new(MENU_W, mh);
 	cairo_t *cr = cairo_create(s);
@@ -934,7 +1131,7 @@ void shell_toggle_start(struct shell *sh) {
 /* ---------------------------------------------------------------- events */
 
 static struct wlr_box menu_box(struct shell *sh) {
-	return (struct wlr_box){0, sh->h - bar_h(sh) - sh->menu_h, MENU_W, sh->menu_h};
+	return (struct wlr_box){0, sh->h - bar_h(sh) - sh->menu_h, menu_w(sh), sh->menu_h};
 }
 
 static int list_index_at(struct shell *sh, double mx, double my) {
@@ -1016,17 +1213,19 @@ bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 	}
 	bool on_bar = y >= sh->h - bar_h(sh);
 	int task_hot = -1;
-	bool start_hot = false;
+	bool start_hot = false, showdesk_hot = false;
 	if (on_bar) {
 		double by = y - (sh->h - bar_h(sh));
 		start_hot = x < start_w(sh);
+		showdesk_hot = bar7(sh) && in_box(&sh->showdesk_box, x, by);
 		for (int i = 0; i < sh->n_tasks; i++)
 			if (in_box(&sh->tasks[i].box, x, by))
 				task_hot = i;
 	}
-	if (task_hot != sh->task_hot || start_hot != sh->start_hot) {
+	if (task_hot != sh->task_hot || start_hot != sh->start_hot || showdesk_hot != sh->showdesk_hot) {
 		sh->task_hot = task_hot;
 		sh->start_hot = start_hot;
+		sh->showdesk_hot = showdesk_hot;
 		draw_taskbar(sh);
 	}
 	return on_bar;
@@ -1108,6 +1307,32 @@ bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, 
 			return true;
 		}
 		double by = y - (sh->h - bar_h(sh));
+		if (bar7(sh) && in_box(&sh->showdesk_box, x, by)) {
+			if (sh->start_open)
+				shell_toggle_start(sh);
+			bool any_vis = false;
+			for (int i = 0; i < sh->n_tasks; i++)
+				if (!sh->tasks[i].view->minimized)
+					any_vis = true;
+			if (any_vis) {
+				sh->n_peeked = 0;
+				for (int i = 0; i < sh->n_tasks && sh->n_peeked < 64; i++)
+					if (!sh->tasks[i].view->minimized) {
+						sh->peeked[sh->n_peeked++] = sh->tasks[i].view;
+						view_set_minimized(sh->tasks[i].view, true);
+					}
+				view_focus(NULL);
+			} else {
+				for (int i = 0; i < sh->n_peeked; i++)
+					for (int j = 0; j < sh->n_tasks; j++)
+						if (sh->tasks[j].view == sh->peeked[i])
+							view_set_minimized(sh->peeked[i], false);
+				if (sh->n_peeked > 0)
+					view_focus(sh->peeked[sh->n_peeked - 1]);
+				sh->n_peeked = 0;
+			}
+			return true;
+		}
 		for (int i = 0; i < sh->n_tasks; i++)
 			if (in_box(&sh->tasks[i].box, x, by)) {
 				struct view *v = sh->tasks[i].view;
@@ -1221,8 +1446,13 @@ bool shell_axis(struct shell *sh, double x, double y, double delta) {
 void shell_reconfigure(struct shell *sh) {
 	if (sh->start_open)
 		shell_toggle_start(sh);
-	sh->modern = sh->server->opt_modern_start;
-	sh->menu_h = MENU_H + (sh->modern ? SEARCH_H : 0);
+	for (int i = 0; i < sh->n_icons; i++)
+		sh->icons[i].img = theme_icon(desk_theme(sh), sh->icons[i].icon);
+	for (int i = 0; i < sh->n_items; i++)
+		if (sh->items[i].icon)
+			sh->items[i].img = theme_icon(menu_theme(sh), sh->items[i].icon);
+	sh->modern = menu7(sh) || sh->server->opt_modern_start;
+	sh->menu_h = menu7(sh) ? W7_MENU_H : MENU_H + (sh->modern ? SEARCH_H : 0);
 	layout_menu(sh);
 	tick(sh);
 	draw_desktop(sh);
@@ -1241,13 +1471,14 @@ struct shell *shell_create(struct server *s) {
 	struct shell *sh = calloc(1, sizeof(*sh));
 	sh->server = s;
 	sh->menu_hot = sh->task_hot = sh->icon_sel = sh->list_hot = sh->list_sel = sh->cascade_hot = -1;
-	sh->modern = s->opt_modern_start;
-	sh->menu_h = MENU_H + (sh->modern ? SEARCH_H : 0);
+	sh->modern = menu7(sh) || s->opt_modern_start;
+	sh->menu_h = menu7(sh) ? W7_MENU_H : MENU_H + (sh->modern ? SEARCH_H : 0);
 	tick(sh);
 	apps_load();
 	update_results(sh);
-	sh->vol_icon = theme_icon(&s->theme, "volume");
-	sh->vol_icon_muted = theme_icon(&s->theme, "volume-muted");
+	struct theme *vt = s->have_xp ? &s->theme : &s->theme7;
+	sh->vol_icon = theme_icon(vt, "volume");
+	sh->vol_icon_muted = theme_icon(vt, "volume-muted");
 	sh->vol_ok = volume_available() && sh->vol_icon.s16;
 	if (sh->vol_ok)
 		vol_refresh(sh);
@@ -1255,25 +1486,25 @@ struct shell *shell_create(struct server *s) {
 	add_icon(sh, "My Documents", getenv("USER"), "my-documents", "expede-explorer ~");
 	add_icon(sh, "My Computer", "Computer", "computer", "expede-explorer computer:");
 	add_icon(sh, "My Network Places", "Network", "network", "pcmanfm-qt network:///");
-	add_icon(sh, "Recycle Bin", NULL, "recycle-empty", "expede-explorer trash:");
+	add_icon(sh, "Recycle Bin", "Recycle Bin", "recycle-empty", "expede-explorer trash:");
 
-	add_item(sh, ITEM_PINNED, "Command Prompt", "cmd", "foot");
-	add_item(sh, ITEM_PINNED, "Windows Explorer", "explorer", "expede-explorer ~");
-	add_item(sh, ITEM_SEP_LEFT, NULL, NULL, NULL);
-	add_item(sh, ITEM_MFU, "Notepad", "notepad", "mousepad");
-	add_item(sh, ITEM_MFU, "Snipping Tool", "my-pictures", "expede-snip");
-	add_item(sh, ITEM_ALL_PROGRAMS, "All Programs", NULL, NULL);
-	add_item(sh, ITEM_PLACE_BOLD, "My Documents", "my-documents", "expede-explorer ~");
-	add_item(sh, ITEM_PLACE_BOLD, "My Pictures", "my-pictures", "expede-explorer ~/Pictures");
-	add_item(sh, ITEM_PLACE_BOLD, "My Music", "my-music", "expede-explorer ~/Music");
-	add_item(sh, ITEM_PLACE_BOLD, "My Computer", "computer", "expede-explorer computer:");
-	add_item(sh, ITEM_SEP_RIGHT, NULL, NULL, NULL);
-	add_item(sh, ITEM_PLACE, "Control Panel", "control-panel", "expede-settings");
-	add_item(sh, ITEM_PLACE, "Help and Support", "help", NULL);
-	add_item(sh, ITEM_PLACE, "Search", "search", "expede-explorer ~");
-	add_item(sh, ITEM_PLACE, "Run...", "run", "foot");
-	add_item(sh, ITEM_LOGOFF, "Log Off", NULL, NULL);
-	add_item(sh, ITEM_TURNOFF, "Turn Off Computer", NULL, NULL);
+	add_item(sh, ITEM_PINNED, "Command Prompt", "Command Prompt", "cmd", "foot");
+	add_item(sh, ITEM_PINNED, "Windows Explorer", "Windows Explorer", "explorer", "expede-explorer ~");
+	add_item(sh, ITEM_SEP_LEFT, NULL, "", NULL, NULL);
+	add_item(sh, ITEM_MFU, "Notepad", "Notepad", "notepad", "mousepad");
+	add_item(sh, ITEM_MFU, "Snipping Tool", "Snipping Tool", "my-pictures", "expede-snip");
+	add_item(sh, ITEM_ALL_PROGRAMS, "All Programs", "All Programs", NULL, NULL);
+	add_item(sh, ITEM_PLACE_BOLD, "My Documents", "Documents", "my-documents", "expede-explorer ~");
+	add_item(sh, ITEM_PLACE_BOLD, "My Pictures", "Pictures", "my-pictures", "expede-explorer ~/Pictures");
+	add_item(sh, ITEM_PLACE_BOLD, "My Music", "Music", "my-music", "expede-explorer ~/Music");
+	add_item(sh, ITEM_PLACE_BOLD, "My Computer", "Computer", "computer", "expede-explorer computer:");
+	add_item(sh, ITEM_SEP_RIGHT, NULL, "", NULL, NULL);
+	add_item(sh, ITEM_PLACE, "Control Panel", "Control Panel", "control-panel", "expede-settings");
+	add_item(sh, ITEM_PLACE, "Help and Support", "Help and Support", "help", NULL);
+	add_item(sh, ITEM_PLACE, "Search", NULL, "search", "expede-explorer ~");
+	add_item(sh, ITEM_PLACE, "Run...", NULL, "run", "foot");
+	add_item(sh, ITEM_LOGOFF, "Log Off", "", NULL, NULL);
+	add_item(sh, ITEM_TURNOFF, "Turn Off Computer", "Shut down", NULL, NULL);
 	layout_menu(sh);
 
 

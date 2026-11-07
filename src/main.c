@@ -1933,7 +1933,7 @@ static const char *default_assets(void) {
 static int conf_style(const char *v) {
 	if (!strcasecmp(v, "7") || !strcasecmp(v, "win7") || !strcasecmp(v, "windows7"))
 		return 7;
-	if (!strcasecmp(v, "xp"))
+	if (!strcasecmp(v, "xp") || !strcasecmp(v, "classic"))
 		return 0;
 	return -1;
 }
@@ -1970,6 +1970,7 @@ static void resolve_styles(struct server *s, bool wall_set) {
 static void load_config(struct server *s) {
 	s->opt_tap = true;
 	s->opt_natural_scroll = true;
+	s->opt_modern_start = false;
 	s->opt_pointer_speed = 0;
 	s->opt_scale = 0;
 	s->opt_sounds = true;
@@ -1994,8 +1995,10 @@ static void load_config(struct server *s) {
 	else
 		snprintf(path, sizeof(path), "%s/.config/expede/expede.conf", getenv("HOME"));
 	FILE *f = fopen(path, "r");
-	if (!f)
+	if (!f) {
+		resolve_styles(s, wall_set);
 		return;
+	}
 	char line[512], key[64], val[256];
 	while (fgets(line, sizeof(line), f)) {
 		/* key = value, where the value runs to the end of the line (wallpaper names have spaces) */
@@ -2041,8 +2044,10 @@ static void load_config(struct server *s) {
 			s->st_frames = conf_style(val);
 		else if (!strcmp(key, "taskbar"))
 			s->st_taskbar = conf_style(val);
-		else if (!strcmp(key, "start_menu"))
+		else if (!strcmp(key, "start_menu")) {
 			s->st_start = conf_style(val);
+			s->opt_modern_start = !strcasecmp(val, "modern") || !strcasecmp(val, "search") || s->st_start == 7;
+		}
 		else if (!strcmp(key, "logon"))
 			s->st_logon = conf_style(val);
 		else if (!strcmp(key, "sound_scheme"))
