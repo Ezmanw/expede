@@ -740,7 +740,7 @@ static void list_dir(const char *dir, struct choice **out, int *n, bool wallpape
 /* ================================================================== applets and categories */
 
 enum kind {
-	K_CP, K_DISPLAY, K_TASKBAR, K_NETWORK, K_PROGRAMS, K_DEFAULTS, K_SOUNDS, K_SYSTEM, K_POWER,
+	K_CP, K_DISPLAY, K_PERSONALIZE, K_TASKBAR, K_NETWORK, K_PROGRAMS, K_DEFAULTS, K_SOUNDS, K_SYSTEM, K_POWER,
 	K_MOUSE, K_BLUETOOTH, K_USERS, K_DATETIME, K_COUNT
 };
 
@@ -749,6 +749,7 @@ static const struct applet {
 } applets[K_COUNT] = {
 	[K_CP] = {NULL, "Control Panel", "Control Panel", "control-panel", {NULL}},
 	[K_DISPLAY] = {"display", "Display", "Display Properties", "cp-display", {"Desktop", "Appearance", "Settings", NULL}},
+	[K_PERSONALIZE] = {"personalize", "Personalization", "Personalization", "cp-appearance", {"Window Color", "Advanced", NULL}},
 	[K_TASKBAR] = {"taskbar", "Taskbar and Start Menu", "Taskbar and Start Menu Properties", "cp-taskbar", {"Taskbar", "Start Menu", NULL}},
 	[K_NETWORK] = {"network", "Network Connections", "Network Connections", "cp-network", {"Wireless Networks", "Connections", NULL}},
 	[K_PROGRAMS] = {"programs", "Add or Remove Programs", "Add or Remove Programs", "cp-programs", {NULL}},
@@ -764,7 +765,7 @@ static const struct applet {
 
 /* XP's Control Panel categories and the applets under each */
 static const struct category { const char *name, *icon, *blurb; enum kind items[4]; } categories[] = {
-	{"Appearance and Themes", "cp-appearance", "Change the desktop background, screen resolution, or the taskbar and Start menu.", {K_DISPLAY, K_TASKBAR}},
+	{"Appearance and Themes", "cp-appearance", "Change the desktop background, Windows XP / 7 style, glass colour, or the taskbar and Start menu.", {K_PERSONALIZE, K_DISPLAY, K_TASKBAR}},
 	{"Network and Internet\nConnections", "cp-network", "Connect to wireless networks and see your connections.", {K_NETWORK}},
 	{"Add or Remove Programs", "cp-programs", "Remove programs, or choose which program opens what.", {K_PROGRAMS, K_DEFAULTS}},
 	{"Sounds, Speech, and Audio\nDevices", "cp-sounds", "Change the volume, sound scheme or speakers.", {K_SOUNDS}},
@@ -785,13 +786,16 @@ enum {
 	ID_WIFI_CONNECT, ID_WIFI_DISCONNECT, ID_WIFI_PW, ID_BT_POWER, ID_BT_SCAN, ID_BT_CONNECT, ID_BT_DISCONNECT,
 	ID_BT_REMOVE, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_REMOVE_PROG,
 	ID_CHANGE_PROGS, ID_ADD_PROGS, ID_SEARCH_PKGS, ID_INSTALL_PKG, ID_PKG_TERM, ID_PKG_QUERY,
-	ID_SET_ZONE, ID_XP_STYLE, ID_START_XP, ID_START_SEARCH, ID_START_W7,
+	ID_SET_ZONE, ID_XP_STYLE, ID_W7_STYLE, ID_GLASS_ON, ID_GLASS_INTENSITY,
+	ID_START_XP, ID_START_SEARCH, ID_START_W7, ID_OPEN_PERSONALIZE,
 	ID_TAB = 50,          /* + tab */
 	ID_SCALE = 60,        /* + 0..5 */
 	ID_SCREEN_OFF = 70,   /* + choice */
 	ID_SCREEN = 80,       /* + screen */
 	ID_CATEGORY = 100,    /* + category */
 	ID_APPLET = 200,      /* + kind */
+	ID_SWATCH = 300,      /* + 0..14 */
+	ID_PART_OVR = 400,    /* + part * 3 + (0=auto, 1=xp, 2=7) */
 	ID_LIST = 1000,       /* + row */
 	ID_LIST2 = 5000,      /* + row, a second list */
 };
@@ -1004,9 +1008,11 @@ static void paint_display(struct sheet *s, cairo_t *cr) {
 		for (int i = 0; i < 6; i++)
 			ui_check(w, cr, ID_SCALE + i, 30 + (i % 3) * 120, 64 + (i / 3) * 24, cfg.scale_pct == pcts[i], true, labels[i]);
 		hint(cr, 30, 116, "Automatic picks a size from your screen's sharpness,\nlike Windows does.");
-		ui_group(cr, 16, 160, SHEET_W - 32, 64, "Windows and buttons");
-		ui_check(w, cr, ID_XP_STYLE, 30, 184, true, true, "Windows XP style (Luna, Default blue)");
-		hint(cr, 30, 204, "Windows 7 style arrives with your Windows 7 disc.");
+		bool is7 = !strcasecmp(cfg.style, "7") || !strcasecmp(cfg.style, "win7") || !strcasecmp(cfg.style, "windows7");
+		ui_group(cr, 16, 160, SHEET_W - 32, 104, "Windows and buttons");
+		ui_check(w, cr, ID_XP_STYLE, 30, 184, !is7, true, "Windows XP style (Luna, Default blue)");
+		ui_check(w, cr, ID_W7_STYLE, 30, 208, is7, true, "Windows 7 style (Aero)");
+		ui_button(w, cr, ID_OPEN_PERSONALIZE, 30, 232, 140, "Personalization...", false, false);
 	} else {
 		if (!n_screens) {
 			hint(cr, 24, 50, "No screen information yet: this tab needs Expede running.");
@@ -1039,6 +1045,83 @@ static void paint_display(struct sheet *s, cairo_t *cr) {
 			ui_check(w, cr, ID_SCREEN_ENABLED, 28, 324, !(ci >= 0 && cfg.out[ci].disabled), false, "Use this device");
 		else
 			hint(cr, 28, 324, "Your only screen is always on.");
+	}
+}
+
+/* ---------------------------------------------------------------- Personalization */
+
+static const struct { const char *name, *label; uint32_t rgb; } swatches[] = {
+	{"sky", "Sky", 0x74b8fc}, {"twilight", "Twilight", 0x3a6fd8}, {"sea", "Sea", 0x3fb6c9},
+	{"leaf", "Leaf", 0x5fc35f}, {"lime", "Lime", 0xb3d736}, {"sun", "Sun", 0xf6d33c},
+	{"pumpkin", "Pumpkin", 0xf89e38}, {"ruby", "Ruby", 0xd02f3b}, {"blush", "Blush", 0xef6a8e},
+	{"violet", "Violet", 0xc160d3}, {"lavender", "Lavender", 0xa69bd9}, {"taupe", "Taupe", 0xa89f8a},
+	{"chocolate", "Chocolate", 0x7a5737}, {"slate", "Slate", 0x6f7b88}, {"frost", "Frost", 0xe4eaf0},
+};
+#define N_SWATCHES ((int)(sizeof(swatches) / sizeof(*swatches)))
+
+static char *part_val(int p) {
+	switch (p) {
+	case 0: return cfg.frames;
+	case 1: return cfg.taskbar;
+	case 2: return cfg.start_menu;
+	case 3: return cfg.logon;
+	case 4: return cfg.sound_scheme;
+	case 5: return cfg.pointers;
+	default: return cfg.icons;
+	}
+}
+
+static void paint_personalize(struct sheet *s, cairo_t *cr) {
+	struct ui_win *w = s->win;
+	if (s->tab == 0) {
+		bool is7 = !strcasecmp(cfg.style, "7") || !strcasecmp(cfg.style, "win7") || !strcasecmp(cfg.style, "windows7");
+		ui_group(cr, 16, 40, SHEET_W - 32, 74, "Windows style");
+		ui_check(w, cr, ID_XP_STYLE, 30, 62, !is7, true, "Windows XP (Luna)");
+		ui_check(w, cr, ID_W7_STYLE, 30, 86, is7, true, "Windows 7 (Aero)");
+
+		ui_group(cr, 16, 124, SHEET_W - 32, 266, "Window color and appearance");
+		ui_text(cr, "Tahoma 8", "Change the color of your window borders, Start menu, and taskbar:", 30, 146, SHEET_W - 60, 0x000000);
+		for (int i = 0; i < N_SWATCHES; i++) {
+			int col = i % 8, row = i / 8;
+			int sx = 30 + col * 44, sy = 172 + row * 44;
+			bool sel = !strcasecmp(cfg.glass_color, swatches[i].name);
+			bool hot = w->hot == ID_SWATCH + i;
+			if (sel || hot) {
+				ui_fill(cr, sx - 3, sy - 3, 38, 38, sel ? 0x3399ff : 0x9bb4e5);
+				ui_fill(cr, sx - 1, sy - 1, 34, 34, 0xffffff);
+			}
+			ui_fill(cr, sx, sy, 32, 32, 0x505050);
+			ui_fill(cr, sx + 1, sy + 1, 30, 30, swatches[i].rgb);
+			/* diagonal glass shine on the swatch */
+			cairo_save(cr);
+			cairo_rectangle(cr, sx + 1, sy + 1, 30, 14);
+			cairo_clip(cr);
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.35);
+			cairo_paint(cr);
+			cairo_restore(cr);
+			ui_reg(w, ID_SWATCH + i, sx - 2, sy - 2, 36, 36);
+		}
+		ui_check(w, cr, ID_GLASS_ON, 30, 272, cfg.glass, false, "Enable transparency");
+		ui_text(cr, "Tahoma 8", "Color intensity:", 30, 308, 0, 0x000000);
+		slider(w, cr, ID_GLASS_INTENSITY, 126, 302, SHEET_W - 164, cfg.glass_intensity,
+			s->dragging && w->pressed == ID_GLASS_INTENSITY);
+	} else {
+		ui_group(cr, 16, 40, SHEET_W - 32, 340, "Per-part style overrides");
+		hint(cr, 30, 62, "Mix Windows XP and Windows 7 parts, or leave on Auto\nto follow the main Windows style.");
+		static const char *names[7] = {
+			"Window frames", "Taskbar", "Start menu", "Welcome / logon screen",
+			"Sound scheme", "Mouse pointers", "Desktop & shell icons"
+		};
+		for (int p = 0; p < 7; p++) {
+			int y = 104 + p * 36;
+			const char *v = part_val(p);
+			int cur = (!strcasecmp(v, "7") || !strcasecmp(v, "win7") || !strcasecmp(v, "windows7")) ? 2 :
+				(!strcasecmp(v, "xp") || !strcasecmp(v, "classic") || !strcasecmp(v, "modern") || !strcasecmp(v, "search")) ? 1 : 0;
+			ui_text(cr, "Tahoma 8", names[p], 30, y + 2, 160, 0x000000);
+			ui_check(w, cr, ID_PART_OVR + p * 3 + 0, 195, y, cur == 0, true, "Auto");
+			ui_check(w, cr, ID_PART_OVR + p * 3 + 1, 260, y, cur == 1, true, "XP");
+			ui_check(w, cr, ID_PART_OVR + p * 3 + 2, 315, y, cur == 2, true, "Windows 7");
+		}
 	}
 }
 
@@ -1571,6 +1654,7 @@ static void sheet_paint(struct ui_win *w, cairo_t *cr) {
 	tabs_and_buttons(s, cr);
 	switch (s->kind) {
 	case K_DISPLAY: paint_display(s, cr); break;
+	case K_PERSONALIZE: paint_personalize(s, cr); break;
 	case K_TASKBAR: paint_taskbar(s, cr); break;
 	case K_NETWORK: paint_network(s, cr); break;
 	case K_DEFAULTS: paint_defaults(s, cr); break;
@@ -1699,7 +1783,7 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 	if (button != UI_LEFT)
 		return;
 	if (pressed) {
-		if (id == ID_VOLUME || id == ID_SPEED || id == ID_MIC) {
+		if (id == ID_VOLUME || id == ID_SPEED || id == ID_MIC || id == ID_GLASS_INTENSITY) {
 			s->dragging = true;
 			w->motion(w, x, y, true);
 		}
@@ -1715,6 +1799,18 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 		return;
 	if (id >= ID_LIST2) { list_pick(s, id - ID_LIST2, true, 1); redraw_all(); return; }
 	if (id >= ID_LIST) { list_pick(s, id - ID_LIST, false, 1); redraw_all(); return; }
+	if (id >= ID_PART_OVR && id < ID_PART_OVR + 21) {
+		static const char *vals[3] = {"auto", "xp", "7"};
+		int p = (id - ID_PART_OVR) / 3, c = (id - ID_PART_OVR) % 3;
+		snprintf(part_val(p), 16, "%s", vals[c]);
+		redraw_all();
+		return;
+	}
+	if (id >= ID_SWATCH && id < ID_SWATCH + N_SWATCHES) {
+		snprintf(cfg.glass_color, sizeof(cfg.glass_color), "%s", swatches[id - ID_SWATCH].name);
+		redraw_all();
+		return;
+	}
 	if (id >= ID_APPLET && id < ID_APPLET + K_COUNT) { open_applet(id - ID_APPLET); return; }
 	if (id >= ID_SCREEN && id < ID_SCREEN + 8) { screen_sel = id - ID_SCREEN; s->scroll = 0; return; }
 	if (id >= ID_SCREEN_OFF && id < ID_SCREEN_OFF + 6) {
@@ -1738,6 +1834,10 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 	}
 	switch (id) {
 	case ID_SNAP: cfg.snap = !cfg.snap; break;
+	case ID_XP_STYLE: snprintf(cfg.style, sizeof(cfg.style), "xp"); break;
+	case ID_W7_STYLE: snprintf(cfg.style, sizeof(cfg.style), "7"); break;
+	case ID_GLASS_ON: cfg.glass = !cfg.glass; break;
+	case ID_OPEN_PERSONALIZE: open_applet(K_PERSONALIZE); break;
 	case ID_START_XP: snprintf(cfg.start_menu, sizeof(cfg.start_menu), "xp"); break;
 	case ID_START_SEARCH: snprintf(cfg.start_menu, sizeof(cfg.start_menu), "modern"); break;
 	case ID_START_W7: snprintf(cfg.start_menu, sizeof(cfg.start_menu), "7"); break;
@@ -1871,6 +1971,8 @@ static void sheet_motion(struct ui_win *w, double x, double y, bool held) {
 		}
 	} else if (w->pressed == ID_SPEED) {
 		cfg.speed = slider_value(w, ID_SPEED, x) * 2 - 100;
+	} else if (w->pressed == ID_GLASS_INTENSITY) {
+		cfg.glass_intensity = slider_value(w, ID_GLASS_INTENSITY, x);
 	}
 	redraw_all();
 }
