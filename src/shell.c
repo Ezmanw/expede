@@ -65,6 +65,8 @@ struct shell {
 	struct wlr_scene_buffer *desktop, *taskbar, *menu, *cascade;
 	struct wlr_scene_buffer *bar_glass, *menu_glass;
 	char date[24];
+	int bat_pct; /* -1: no battery */
+	bool bat_charging;
 	struct wlr_box showdesk_box; /* taskbar coords */
 	bool showdesk_hot;
 	struct view *peeked[64]; /* windows Show desktop minimised, to bring back */
@@ -293,7 +295,65 @@ static void add_icon(struct shell *sh, const char *label, const char *label7, co
 
 /* ---------------------------------------------------------------- taskbar */
 
+/* first battery under /sys/class/power_supply, like the tray's power meter */
+static void read_battery(struct shell *sh) {
+	sh->bat_pct = -1;
+	for (int i = 0; i < 4; i++) {
+		char p[96];
+		snprintf(p, sizeof(p), "/sys/class/power_supply/BAT%d/capacity", i);
+		FILE *f = fopen(p, "r");
+		if (!f)
+			continue;
+		if (fscanf(f, "%d", &sh->bat_pct) != 1)
+			sh->bat_pct = -1;
+		fclose(f);
+		snprintf(p, sizeof(p), "/sys/class/power_supply/BAT%d/status", i);
+		char st[32] = "";
+		if ((f = fopen(p, "r"))) {
+			if (!fgets(st, sizeof(st), f))
+				st[0] = 0;
+			fclose(f);
+		}
+		sh->bat_charging = !strncmp(st, "Charging", 8) || !strncmp(st, "Full", 4);
+		return;
+	}
+}
+
+/* a 16px battery: outline, fill to the charge (red when low), bolt when plugged in */
+static void draw_battery(cairo_t *cr, struct shell *sh, double x, double y) {
+	cairo_set_line_width(cr, 1);
+	cairo_rectangle(cr, x + 0.5, y + 4.5, 13, 8);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_stroke_preserve(cr);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.5);
+	cairo_fill(cr);
+	cairo_rectangle(cr, x + 14, y + 6.5, 2, 4);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	cairo_fill(cr);
+	int pct = sh->bat_pct > 100 ? 100 : sh->bat_pct;
+	if (pct <= 15)
+		cairo_set_source_rgb(cr, 0.9, 0.15, 0.1);
+	else
+		cairo_set_source_rgb(cr, 0.3, 0.85, 0.25);
+	cairo_rectangle(cr, x + 2, y + 6, 10 * pct / 100.0, 5);
+	cairo_fill(cr);
+	if (sh->bat_charging) {
+		cairo_move_to(cr, x + 8, y + 3);
+		cairo_line_to(cr, x + 4.5, y + 9);
+		cairo_line_to(cr, x + 7.5, y + 9);
+		cairo_line_to(cr, x + 6, y + 14);
+		cairo_line_to(cr, x + 10.5, y + 8);
+		cairo_line_to(cr, x + 7.5, y + 8);
+		cairo_close_path(cr);
+		cairo_set_source_rgb(cr, 1, 0.85, 0.1);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgb(cr, 0, 0, 0);
+		cairo_stroke(cr);
+	}
+}
+
 static void tick(struct shell *sh) {
+	read_battery(sh);
 	time_t now = time(NULL);
 	struct tm tm;
 	localtime_r(&now, &tm);
@@ -333,6 +393,10 @@ static void draw_taskbar7(struct shell *sh) {
 	draw_text(cr, "Segoe UI 9", sh->clock, cx + (clock_w - cw) / 2, 4, 0, 0xffffff, 0, 0, 0, false);
 	draw_text(cr, "Segoe UI 9", sh->date, cx + (clock_w - dw) / 2, 20, 0, 0xffffff, 0, 0, 0, false);
 	int tx = cx;
+	if (sh->bat_pct >= 0) {
+		tx -= 24;
+		draw_battery(cr, sh, tx + 4, 12);
+	}
 	if (sh->vol_ok) {
 		tx -= 26;
 		sh->vol_icon_box = (struct wlr_box){tx, 8, 24, 24};
@@ -387,7 +451,7 @@ static void draw_taskbar(struct shell *sh) {
 
 	/* tray: the speaker, then the clock */
 	int cw = text_width("Tahoma 8", sh->clock);
-	int icons_w = sh->vol_ok ? 22 : 0;
+	int icons_w = (sh->vol_ok ? 22 : 0) + (sh->bat_pct >= 0 ? 22 : 0);
 	int trayw = cw + 19 + 14 + icons_w;
 	if (trayw < 62)
 		trayw = 62;
@@ -397,6 +461,8 @@ static void draw_taskbar(struct shell *sh) {
 		sh->vol_icon_box = (struct wlr_box){tx + 17, 5, 20, 20};
 		draw_surface(cr, (sh->vol_muted ? sh->vol_icon_muted : sh->vol_icon).s16, tx + 19, 7);
 	}
+	if (sh->bat_pct >= 0)
+		draw_battery(cr, sh, tx + 19 + (sh->vol_ok ? 22 : 0), 6);
 	draw_text(cr, "Tahoma 8", sh->clock, tx + trayw - 12 - cw, 8, 0, 0xffffff, 0, 0, 0, true);
 
 	/* task buttons */
@@ -437,8 +503,10 @@ static int clock_timer(void *data) {
 	struct shell *sh = data;
 	char old[16];
 	memcpy(old, sh->clock, sizeof(old));
+	int old_bat = sh->bat_pct;
+	bool old_chg = sh->bat_charging;
 	tick(sh);
-	if (strcmp(old, sh->clock))
+	if (strcmp(old, sh->clock) || old_bat != sh->bat_pct || old_chg != sh->bat_charging)
 		draw_taskbar(sh);
 	wl_event_source_timer_update(sh->timer, 1000);
 	return 0;
