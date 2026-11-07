@@ -200,6 +200,31 @@ void draw_frame_true(cairo_t *cr, cairo_surface_t *s, int count, int frame, doub
 	blit(cr, s, fx, fy, fw, fh, x, y, fw, fh, false);
 }
 
+int frame_height(cairo_surface_t *s, int count) {
+	return s ? cairo_image_surface_get_height(s) / (count > 0 ? count : 1) : 0;
+}
+
+void draw_frame_dpi(cairo_t *cr, cairo_surface_t *lo, cairo_surface_t *hi, int count, int frame, double x, double y) {
+	if (!lo)
+		return;
+	if (!hi || ui_scale < 1.5) {
+		draw_frame_true(cr, lo, count, frame, x, y);
+		return;
+	}
+	/* the 192 dpi art drawn at the 96 dpi size: sharp on 2x screens */
+	double k = (double)cairo_image_surface_get_width(lo) / cairo_image_surface_get_width(hi);
+	int fh = frame_height(hi, count);
+	cairo_save(cr);
+	cairo_translate(cr, x, y);
+	cairo_scale(cr, k, k);
+	cairo_rectangle(cr, 0, 0, cairo_image_surface_get_width(hi), fh);
+	cairo_clip(cr);
+	cairo_set_source_surface(cr, hi, 0, -fh * frame);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_restore(cr);
+}
+
 void draw_surface(cairo_t *cr, cairo_surface_t *s, double x, double y) {
 	if (!s)
 		return;
@@ -208,6 +233,28 @@ void draw_surface(cairo_t *cr, cairo_surface_t *s, double x, double y) {
 }
 
 /* ---- text ---- */
+
+static int font_version;
+
+void theme_use_fonts(const struct theme *t) {
+	font_version = t ? t->version : 0;
+}
+
+/* Windows 7 drew its UI in Segoe UI 9 where XP used Tahoma 8 (and Trebuchet
+ * for captions): map the XP names so every caller follows the version. */
+static PangoFontDescription *version_font(const char *font) {
+	PangoFontDescription *d = pango_font_description_from_string(font);
+	const char *fam = pango_font_description_get_family(d);
+	if (font_version == 7 && fam && (!strcasecmp(fam, "Tahoma") || !strcasecmp(fam, "Trebuchet MS"))) {
+		pango_font_description_set_family(d, "Segoe UI");
+		int sz = pango_font_description_get_size(d) / PANGO_SCALE;
+		if (sz == 8)
+			pango_font_description_set_size(d, 9 * PANGO_SCALE);
+		if (!strcasecmp(fam, "Trebuchet MS") && sz <= 10)
+			pango_font_description_set_weight(d, PANGO_WEIGHT_NORMAL);
+	}
+	return d;
+}
 
 static PangoLayout *make_layout(cairo_t *cr, const char *font, const char *text, double maxw, bool crisp) {
 	PangoLayout *l = pango_cairo_create_layout(cr);
@@ -220,7 +267,9 @@ static PangoLayout *make_layout(cairo_t *cr, const char *font, const char *text,
 	/* XP sizes are points at 96 dpi */
 	pango_cairo_context_set_resolution(pango_layout_get_context(l), 96);
 	pango_layout_context_changed(l);
-	PangoFontDescription *d = pango_font_description_from_string(font);
+	PangoFontDescription *d = version_font(font);
+	if (font_version == 7)
+		crisp = false; /* ClearType-era text is smoothed */
 	pango_layout_set_font_description(l, d);
 	pango_font_description_free(d);
 	pango_layout_set_text(l, text, -1);
@@ -435,6 +484,41 @@ static int button_offset(const char *section, int fallback) {
 	return -o[0];
 }
 
+static void load_w7(struct theme *t) {
+	/* DWMWindow parts: 3/4 min, 5/6 max, 7/8 close (active/inactive) */
+	static const char *btn[2][3] = {{"DWMWindow.3", "DWMWindow.5", "DWMWindow.7"},
+		{"DWMWindow.4", "DWMWindow.6", "DWMWindow.8"}};
+	for (int i = 0; i < 2; i++)
+		for (int j = 0; j < 3; j++)
+			load_image(t, &t->w7_btn[i][j], btn[i][j]);
+	/* glyphs: close 12-15, max 21-24, min 25-28, restore 29-32, smallest first */
+	static const int glyph[4] = {12, 21, 25, 29};
+	for (int g = 0; g < 4; g++) {
+		char sec[32];
+		snprintf(sec, sizeof(sec), "DWMWindow.%d", glyph[g]);
+		t->w7_glyph[g][0] = load_ini_file(t, sec, "ImageFile");
+		snprintf(sec, sizeof(sec), "DWMWindow.%d", glyph[g] + 3);
+		t->w7_glyph[g][1] = load_ini_file(t, sec, "ImageFile");
+	}
+	load_image(t, &t->w7_glow[0], "DWMWindow.16");
+	load_image(t, &t->w7_glow[1], "DWMWindow.11");
+	t->w7_reflect = load_ini_file(t, "DWMWindow.40", "ImageFile");
+	t->orb[0] = theme_png(t, "icons/orb.png");
+	t->orb[1] = theme_png(t, "icons/orb-192.png");
+	t->w7_userframe = theme_png(t, "icons/userframe.png");
+	load_image(t, &t->w7_task, "TaskBand2.5");
+	load_image(t, &t->w7_tray_btn, "TrayNotifyHoriz::Button");
+	load_image(t, &t->w7_show_desktop, "ShowDesktop::Button");
+	load_image(t, &t->w7_sp_left, "StartPanelComposited::StartPanelPriv.6");
+	load_image(t, &t->w7_sp_right, "StartPanelComposited::StartPanelPriv.7");
+	load_image(t, &t->w7_sp_search, "StartPanelPriv.15");
+	load_image(t, &t->w7_sp_item, "StartPanelPriv.18");
+	load_image(t, &t->w7_sp_place, "StartPanelPriv.19");
+	load_image(t, &t->w7_sp_shutdown, "StartPanelPriv.23");
+	load_image(t, &t->w7_sp_shutdown_arrow, "StartPanelPriv.24");
+	load_image(t, &t->w7_sp_progs, "StartPanelPriv.12");
+}
+
 bool theme_load(struct theme *t, const char *dir) {
 	snprintf(t->dir, sizeof(t->dir), "%s", dir);
 	char path[768];
@@ -447,9 +531,11 @@ bool theme_load(struct theme *t, const char *dir) {
 	fseek(f, 0, SEEK_END);
 	long n = ftell(f);
 	rewind(f);
+	free(ini_text);
 	ini_text = calloc(1, n + 1);
 	fread(ini_text, 1, n, f);
 	fclose(f);
+	t->version = strstr(ini_text, "; Windows 7") == ini_text ? 7 : 0;
 
 	load_image(t, &t->caption, "Window.Caption");
 	load_image(t, &t->max_caption, "Window.MaxCaption");
@@ -492,6 +578,9 @@ bool theme_load(struct theme *t, const char *dir) {
 	t->prog_sep = load_ini_file(t, "StartPanel.ProgListSeparator", "ImageFile");
 	t->places_sep = load_ini_file(t, "StartPanel.PlacesListSeparator", "ImageFile");
 	t->start_flag = theme_png(t, "icons/start-flag.png");
+
+	if (t->version == 7)
+		load_w7(t);
 
 	int bg[3] = {0, 78, 152};
 	ini_ints("SysMetrics", "Background", bg, 3);

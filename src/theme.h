@@ -32,6 +32,18 @@ struct theme {
 	cairo_surface_t *prog_sep, *places_sep, *start_flag, *wallpaper, *user_pic;
 	int wallpaper_style; /* WALL_STRETCH, WALL_CENTER, WALL_TILE */
 	double desktop_bg[3];
+
+	/* Windows 7 (version 7): rip from w7rip, Aero's decompiled msstyles */
+	int version; /* 0 = XP Luna, 7 = Windows 7 Aero */
+	struct image w7_btn[2][3];         /* [inactive][min, max, close]: normal hot pressed disabled */
+	cairo_surface_t *w7_glyph[4][2];   /* [close, max, min, restore][96, 192 dpi]: 4 frames */
+	struct image w7_glow[2];           /* hover glow behind caption buttons, close */
+	cairo_surface_t *w7_reflect;       /* the streaks on glass */
+	cairo_surface_t *orb[2];           /* start orb at 96 and 192 dpi: normal hot pressed */
+	struct image w7_task;              /* superbar task button: 10 frames */
+	struct image w7_tray_btn, w7_show_desktop, w7_sp_left, w7_sp_right, w7_sp_search;
+	struct image w7_sp_item, w7_sp_place, w7_sp_shutdown, w7_sp_shutdown_arrow, w7_sp_progs;
+	cairo_surface_t *w7_userframe;
 };
 
 struct icon_set { cairo_surface_t *s16, *s32; };
@@ -44,6 +56,11 @@ cairo_surface_t *canvas_new(int w, int h);
 enum { WALL_STRETCH, WALL_CENTER, WALL_TILE };
 
 bool theme_load(struct theme *t, const char *dir);
+/* text drawn after this uses the fonts of t's Windows version (Tahoma or Segoe UI) */
+void theme_use_fonts(const struct theme *t);
+/* frame of a per-DPI pair (96 dpi, 192 dpi) at its 96 dpi size, sharp on 2x screens */
+void draw_frame_dpi(cairo_t *cr, cairo_surface_t *lo, cairo_surface_t *hi, int count, int frame, double x, double y);
+int frame_height(cairo_surface_t *s, int count);
 /* name: a file in <assets>/wallpapers, an absolute path, or "" for none; style "auto"
  * tiles the old .tile.png patterns and stretches photos, as XP did */
 void theme_set_wallpaper(struct theme *t, const char *name, const char *style);

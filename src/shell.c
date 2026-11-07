@@ -8,6 +8,7 @@
  * left column for a scrolling list. */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -26,11 +27,21 @@
 #define ROW_H 24       /* modern list rows */
 #define CASCADE_ROW 22 /* XP menu rows */
 #define CASCADE_COL 220
+/* Windows 7 */
+#define W7_ORB 54      /* the start orb, 96 dpi */
+#define W7_OVER 8      /* the orb rises this far above the superbar */
+#define W7_TASK_W 60   /* icon-only task buttons */
+#define W7_SHOWDESK 15
+#define W7_MENU_W 400
+#define W7_MENU_H 520
+#define W7_LEFT_W 250
+#define W7_PIC_OVER 20 /* the account picture rises above the menu */
 
 enum item_kind { ITEM_PINNED, ITEM_MFU, ITEM_PLACE_BOLD, ITEM_PLACE, ITEM_SEP_LEFT, ITEM_SEP_RIGHT,
 	ITEM_ALL_PROGRAMS, ITEM_LOGOFF, ITEM_TURNOFF };
 
 struct menu_item {
+	const char *label7; /* Windows 7's wording; NULL hides the item there */
 	enum item_kind kind;
 	const char *label, *icon, *cmd;
 	struct icon_set img;
@@ -38,7 +49,7 @@ struct menu_item {
 };
 
 struct desk_icon {
-	const char *label, *icon, *cmd;
+	const char *label, *label7, *icon, *cmd;
 	struct icon_set img;
 	struct wlr_box box;
 };
@@ -52,6 +63,12 @@ struct shell {
 	struct server *server;
 	int w, h;
 	struct wlr_scene_buffer *desktop, *taskbar, *menu, *cascade;
+	struct wlr_scene_buffer *bar_glass, *menu_glass;
+	char date[24];
+	struct wlr_box showdesk_box; /* taskbar coords */
+	bool showdesk_hot;
+	struct view *peeked[64]; /* windows Show desktop minimised, to bring back */
+	int n_peeked;
 	struct menu_item items[24];
 	int n_items, menu_hot;
 	struct desk_icon icons[8];
@@ -112,10 +129,115 @@ static void fill(cairo_t *cr, double x, double y, double w, double h, uint32_t r
 	cairo_fill(cr);
 }
 
+/* which Windows draws each part (the advanced options can mix them) */
+static struct theme *bar_theme(struct shell *sh) { return theme_of(sh->server, sh->server->st_taskbar); }
+static struct theme *menu_theme(struct shell *sh) { return theme_of(sh->server, sh->server->st_start); }
+static struct theme *desk_theme(struct shell *sh) { return theme_of(sh->server, sh->server->st_icons); }
+static bool bar7(struct shell *sh) { return bar_theme(sh)->version == 7; }
+static bool menu7(struct shell *sh) { return menu_theme(sh)->version == 7; }
+static bool desk7(struct shell *sh) { return desk_theme(sh)->version == 7; }
+static int bar_h(struct shell *sh) { return taskbar_h(sh->server); }
+static int start_w(struct shell *sh) { return bar7(sh) ? W7_ORB + 2 : START_W; }
+static int menu_w(struct shell *sh) { return menu7(sh) ? W7_MENU_W : MENU_W; }
+
+/* Windows 7 hover: a pale blue rounded box */
+static void hl7(cairo_t *cr, struct wlr_box b) {
+	double x = b.x + 0.5, y = b.y + 0.5, w = b.width - 1, h = b.height - 1, r = 3;
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x + w - r, y + r, r, -M_PI / 2, 0);
+	cairo_arc(cr, x + w - r, y + h - r, r, 0, M_PI / 2);
+	cairo_arc(cr, x + r, y + h - r, r, M_PI / 2, M_PI);
+	cairo_arc(cr, x + r, y + r, r, M_PI, 3 * M_PI / 2);
+	cairo_close_path(cr);
+	cairo_pattern_t *p = cairo_pattern_create_linear(0, y, 0, y + h);
+	cairo_pattern_add_color_stop_rgb(p, 0, 0xf2 / 255.0, 0xf8 / 255.0, 0xfe / 255.0);
+	cairo_pattern_add_color_stop_rgb(p, 1, 0xd5 / 255.0, 0xe7 / 255.0, 0xfa / 255.0);
+	cairo_set_source(cr, p);
+	cairo_fill_preserve(cr);
+	cairo_pattern_destroy(p);
+	cairo_set_source_rgb(cr, 0x7d / 255.0, 0xa2 / 255.0, 0xce / 255.0);
+	cairo_set_line_width(cr, 1);
+	cairo_stroke(cr);
+}
+
+/* hover on glass: a lighter pane with a white rim */
+static void glass_hl(cairo_t *cr, struct wlr_box b) {
+	cairo_rectangle(cr, b.x + 0.5, b.y + 0.5, b.width - 1, b.height - 1);
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.22);
+	cairo_fill_preserve(cr);
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.55);
+	cairo_set_line_width(cr, 1);
+	cairo_stroke(cr);
+	cairo_rectangle(cr, b.x - 0.5, b.y - 0.5, b.width + 1, b.height + 1);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
+	cairo_stroke(cr);
+}
+
+/* one blur pass along a line of n pixels, step apart (ARGB, premultiplied) */
+static void blur_line(uint32_t *px, int n, int step, int r, uint32_t *tmp) {
+	for (int i = 0; i < n; i++)
+		tmp[i] = px[i * step];
+	int sum[4] = {0}, cnt = 0;
+	for (int i = -r; i <= r; i++)
+		if (i >= 0 && i < n) {
+			for (int c = 0; c < 4; c++)
+				sum[c] += (tmp[i] >> (c * 8)) & 255;
+			cnt++;
+		}
+	for (int i = 0; i < n; i++) {
+		uint32_t v = 0;
+		for (int c = 0; c < 4; c++)
+			v |= (uint32_t)(sum[c] / cnt) << (c * 8);
+		px[i * step] = v;
+		int out = i - r, in = i + r + 1;
+		if (out >= 0) {
+			for (int c = 0; c < 4; c++)
+				sum[c] -= (tmp[out] >> (c * 8)) & 255;
+			cnt--;
+		}
+		if (in < n) {
+			for (int c = 0; c < 4; c++)
+				sum[c] += (tmp[in] >> (c * 8)) & 255;
+			cnt++;
+		}
+	}
+}
+
+/* Aero glass shows what's behind it blurred; Expede blurs the desktop picture
+ * (wallpaper and icons) once, small, and frames show the part under them */
+static void make_glass(struct shell *sh, cairo_surface_t *desk) {
+	struct server *s = sh->server;
+	int gw = sh->w / GLASS_DIV + 1, gh = sh->h / GLASS_DIV + 1;
+	cairo_surface_t *g = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, gw, gh);
+	cairo_t *cr = cairo_create(g);
+	cairo_scale(cr, (double)gw / sh->w, (double)gh / sh->h);
+	cairo_set_source_surface(cr, desk, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_flush(g);
+	uint32_t *px = (uint32_t *)cairo_image_surface_get_data(g);
+	int st = cairo_image_surface_get_stride(g) / 4;
+	uint32_t *tmp = malloc(sizeof(uint32_t) * (gw > gh ? gw : gh));
+	for (int pass = 0; pass < 3; pass++) {
+		for (int y = 0; y < gh; y++)
+			blur_line(px + y * st, gw, 1, 3, tmp);
+		for (int x = 0; x < gw; x++)
+			blur_line(px + x, gh, st, 3, tmp);
+	}
+	free(tmp);
+	cairo_surface_mark_dirty(g);
+	if (s->glass_buf)
+		wlr_buffer_drop(s->glass_buf);
+	s->glass_buf = buffer_from_cairo(g);
+	server_glass_changed(s);
+}
+
 /* ---------------------------------------------------------------- desktop */
 
 static void draw_desktop(struct shell *sh) {
-	struct theme *t = &sh->server->theme;
+	struct theme *t = desk_theme(sh);
+	theme_use_fonts(t);
 	cairo_surface_t *s = canvas_new(sh->w, sh->h);
 	cairo_t *cr = cairo_create(s);
 	cairo_set_source_rgb(cr, t->desktop_bg[0], t->desktop_bg[1], t->desktop_bg[2]);
@@ -149,19 +271,22 @@ static void draw_desktop(struct shell *sh) {
 			cairo_mask_surface(cr, d->img.s32, ix, d->box.y + 2);
 			cairo_restore(cr);
 		}
-		draw_label(cr, "Tahoma 8", d->label, d->box.x + d->box.width / 2.0, d->box.y + 38, d->box.width - 2,
-			0xffffff, 0x000000, sel ? 0x316ac5 : -1);
+		const char *label = desk7(sh) && d->label7 ? d->label7 : d->label;
+		draw_label(cr, "Tahoma 8", label, d->box.x + d->box.width / 2.0, d->box.y + 38, d->box.width - 2,
+			0xffffff, 0x000000, sel ? (desk7(sh) ? 0x3399ff : 0x316ac5) : -1);
 	}
 	cairo_destroy(cr);
+	make_glass(sh, s);
 	show(&sh->desktop, sh->server->layer_desktop, s, 0, 0);
 }
 
-static void add_icon(struct shell *sh, const char *label, const char *icon, const char *cmd) {
+static void add_icon(struct shell *sh, const char *label, const char *label7, const char *icon, const char *cmd) {
 	struct desk_icon *d = &sh->icons[sh->n_icons];
 	d->label = label;
+	d->label7 = label7;
 	d->icon = icon;
 	d->cmd = cmd;
-	d->img = theme_icon(&sh->server->theme, icon);
+	d->img = theme_icon(desk_theme(sh), icon);
 	d->box = (struct wlr_box){4, 6 + sh->n_icons * 72, 75, 60};
 	sh->n_icons++;
 }
@@ -173,10 +298,83 @@ static void tick(struct shell *sh) {
 	struct tm tm;
 	localtime_r(&now, &tm);
 	strftime(sh->clock, sizeof(sh->clock), sh->server->opt_clock24 ? "%H:%M" : "%-I:%M %p", &tm);
+	strftime(sh->date, sizeof(sh->date), "%-m/%-d/%Y", &tm);
+}
+
+/* Windows 7's superbar: glass, the orb, icon-only buttons, a two-line clock, Show desktop */
+static void draw_taskbar7(struct shell *sh) {
+	struct server *srv = sh->server;
+	struct theme *t = bar_theme(sh);
+	theme_use_fonts(t);
+	int bh = bar_h(sh);
+	cairo_surface_t *s = canvas_new(sh->w, bh + W7_OVER);
+	cairo_t *cr = cairo_create(s);
+	cairo_translate(cr, 0, W7_OVER);
+	cairo_save(cr);
+	cairo_rectangle(cr, 0, 0, sh->w, bh);
+	cairo_clip(cr);
+	draw_glass(srv, cr, -2, 0, sh->w + 4, bh + 2, 0, 0, true);
+	cairo_set_source_rgba(cr, 0, 0, 0, srv->opt_glass ? 0.3 : 0.15);
+	cairo_paint(cr);
+	cairo_restore(cr);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.55);
+	cairo_rectangle(cr, 0, 0, sh->w, 1);
+	cairo_fill(cr);
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.3);
+	cairo_rectangle(cr, 0, 1, sh->w, 1);
+	cairo_fill(cr);
+
+	/* tray: speaker, clock and date, then Show desktop at the very edge */
+	sh->showdesk_box = (struct wlr_box){sh->w - W7_SHOWDESK, 0, W7_SHOWDESK, bh};
+	draw_image(cr, &t->w7_show_desktop, sh->showdesk_hot ? 1 : 0, sh->showdesk_box.x, 0, W7_SHOWDESK, bh);
+	int cw = text_width("Segoe UI 9", sh->clock), dw = text_width("Segoe UI 9", sh->date);
+	int clock_w = (cw > dw ? cw : dw) + 16;
+	int cx = sh->showdesk_box.x - clock_w;
+	draw_text(cr, "Segoe UI 9", sh->clock, cx + (clock_w - cw) / 2, 4, 0, 0xffffff, 0, 0, 0, false);
+	draw_text(cr, "Segoe UI 9", sh->date, cx + (clock_w - dw) / 2, 20, 0, 0xffffff, 0, 0, 0, false);
+	int tx = cx;
+	if (sh->vol_ok) {
+		tx -= 26;
+		sh->vol_icon_box = (struct wlr_box){tx, 8, 24, 24};
+		draw_surface(cr, (sh->vol_muted ? sh->vol_icon_muted : sh->vol_icon).s16, tx + 4, 12);
+	}
+
+	/* task buttons: running windows, icon only */
+	int x0 = start_w(sh) + 4, avail = tx - x0 - 8;
+	int bw = sh->n_tasks && avail / sh->n_tasks < W7_TASK_W ? avail / sh->n_tasks : W7_TASK_W;
+	for (int i = 0; i < sh->n_tasks; i++) {
+		struct task *k = &sh->tasks[i];
+		k->box = (struct wlr_box){x0 + i * bw, 0, bw - 1, bh};
+		bool act = k->view->active && !k->view->minimized, hot = i == sh->task_hot;
+		/* superbar button frames: normal hot pressed, active normal hot pressed, flash... */
+		int f = act ? (hot ? 4 : 3) : (hot ? 1 : 0);
+		draw_image(cr, &t->w7_task, f, k->box.x, 0, k->box.width, bh);
+		struct icon_set *ic = &k->view->icon;
+		if (ic->s32)
+			draw_scaled(cr, ic->s32, k->box.x + (k->box.width - 32) / 2.0, (bh - 32) / 2.0, 32);
+		else if (ic->s16)
+			draw_scaled(cr, ic->s16, k->box.x + (k->box.width - 24) / 2.0, (bh - 24) / 2.0, 24);
+	}
+
+	/* the orb, last: it rises out of the bar */
+	int sf = sh->start_open ? 2 : sh->start_hot ? 1 : 0;
+	draw_frame_dpi(cr, t->orb[0], t->orb[1], 3, sf, (start_w(sh) - W7_ORB) / 2, (bh - W7_ORB) / 2);
+	cairo_destroy(cr);
+	show(&sh->taskbar, srv->layer_shell, s, 0, sh->h - bh - W7_OVER);
+	glass_backdrop(srv, &sh->bar_glass, srv->layer_shell, 0, sh->h - bh, 0, sh->h - bh, sh->w, bh);
+	if (sh->bar_glass)
+		wlr_scene_node_place_below(&sh->bar_glass->node, &sh->taskbar->node);
 }
 
 static void draw_taskbar(struct shell *sh) {
-	struct theme *t = &sh->server->theme;
+	if (bar7(sh)) {
+		draw_taskbar7(sh);
+		return;
+	}
+	if (sh->bar_glass)
+		wlr_scene_node_set_enabled(&sh->bar_glass->node, false);
+	struct theme *t = bar_theme(sh);
+	theme_use_fonts(t);
 	cairo_surface_t *s = canvas_new(sh->w, TASKBAR_H);
 	cairo_t *cr = cairo_create(s);
 	draw_image(cr, &t->taskbar, 0, 0, 0, sh->w, TASKBAR_H);
@@ -219,7 +417,7 @@ static void draw_taskbar(struct shell *sh) {
 			k->box.width - 34, 0xffffff, 0, 0, 0, true);
 	}
 	cairo_destroy(cr);
-	show(&sh->taskbar, sh->server->layer_shell, s, 0, sh->h - TASKBAR_H);
+	show(&sh->taskbar, sh->server->layer_shell, s, 0, sh->h - bar_h(sh));
 }
 
 void shell_views_changed(struct shell *sh) {
@@ -297,7 +495,7 @@ static void vol_set_open(struct shell *sh, bool open) {
 		int x = sh->vol_icon_box.x + sh->vol_icon_box.width / 2 - VOL_W / 2;
 		if (x + VOL_W > sh->w)
 			x = sh->w - VOL_W;
-		sh->vol_box = (struct wlr_box){x, sh->h - TASKBAR_H - VOL_H - 2, VOL_W, VOL_H};
+		sh->vol_box = (struct wlr_box){x, sh->h - bar_h(sh) - VOL_H - 2, VOL_W, VOL_H};
 	}
 	draw_volpop(sh);
 	draw_taskbar(sh);
@@ -586,7 +784,7 @@ static void draw_menu(struct shell *sh) {
 		}
 	}
 	cairo_destroy(cr);
-	show(&sh->menu, sh->server->layer_menu, s, 0, sh->h - TASKBAR_H - mh);
+	show(&sh->menu, sh->server->layer_menu, s, 0, sh->h - bar_h(sh) - mh);
 	wlr_scene_node_set_enabled(&sh->menu->node, sh->start_open);
 }
 
@@ -668,7 +866,7 @@ void shell_toggle_start(struct shell *sh) {
 /* ---------------------------------------------------------------- events */
 
 static struct wlr_box menu_box(struct shell *sh) {
-	return (struct wlr_box){0, sh->h - TASKBAR_H - sh->menu_h, MENU_W, sh->menu_h};
+	return (struct wlr_box){0, sh->h - bar_h(sh) - sh->menu_h, MENU_W, sh->menu_h};
 }
 
 static int list_index_at(struct shell *sh, double mx, double my) {
@@ -748,12 +946,12 @@ bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 		if (in_box(&mb, x, y))
 			return true;
 	}
-	bool on_bar = y >= sh->h - TASKBAR_H;
+	bool on_bar = y >= sh->h - bar_h(sh);
 	int task_hot = -1;
 	bool start_hot = false;
 	if (on_bar) {
-		double by = y - (sh->h - TASKBAR_H);
-		start_hot = x < START_W;
+		double by = y - (sh->h - bar_h(sh));
+		start_hot = x < start_w(sh);
 		for (int i = 0; i < sh->n_tasks; i++)
 			if (in_box(&sh->tasks[i].box, x, by))
 				task_hot = i;
@@ -792,16 +990,16 @@ static void activate_item(struct shell *sh, struct menu_item *m) {
 
 bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, bool over_view) {
 	struct wlr_box mb = menu_box(sh);
-	bool on_bar = y >= sh->h - TASKBAR_H;
+	bool on_bar = y >= sh->h - bar_h(sh);
 	if (sh->vol_open || sh->vol_drag) {
 		if (vol_button(sh, x, y, pressed))
 			return true;
 		/* a click anywhere else closes the pop-up and still does what it would */
 		if (pressed)
 			vol_set_open(sh, false);
-		if (on_bar && in_box(&sh->vol_icon_box, x, y - (sh->h - TASKBAR_H)))
+		if (on_bar && in_box(&sh->vol_icon_box, x, y - (sh->h - bar_h(sh))))
 			return true;
-	} else if (pressed && on_bar && sh->vol_ok && in_box(&sh->vol_icon_box, x, y - (sh->h - TASKBAR_H))) {
+	} else if (pressed && on_bar && sh->vol_ok && in_box(&sh->vol_icon_box, x, y - (sh->h - bar_h(sh)))) {
 		if (sh->start_open)
 			shell_toggle_start(sh);
 		vol_set_open(sh, true);
@@ -829,7 +1027,7 @@ bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, 
 			return true;
 		}
 		/* any click outside closes the menu; the start button's own click toggles it below */
-		if (pressed && !(on_bar && x < START_W)) {
+		if (pressed && !(on_bar && x < start_w(sh))) {
 			shell_toggle_start(sh);
 			return true;
 		}
@@ -837,11 +1035,11 @@ bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, 
 	if (on_bar) {
 		if (!pressed)
 			return true;
-		if (x < START_W) {
+		if (x < start_w(sh)) {
 			shell_toggle_start(sh);
 			return true;
 		}
-		double by = y - (sh->h - TASKBAR_H);
+		double by = y - (sh->h - bar_h(sh));
 		for (int i = 0; i < sh->n_tasks; i++)
 			if (in_box(&sh->tasks[i].box, x, by)) {
 				struct view *v = sh->tasks[i].view;
@@ -986,10 +1184,10 @@ struct shell *shell_create(struct server *s) {
 	if (sh->vol_ok)
 		vol_refresh(sh);
 
-	add_icon(sh, "My Documents", "my-documents", "expede-explorer ~");
-	add_icon(sh, "My Computer", "computer", "expede-explorer computer:");
-	add_icon(sh, "My Network Places", "network", "pcmanfm-qt network:///");
-	add_icon(sh, "Recycle Bin", "recycle-empty", "expede-explorer trash:");
+	add_icon(sh, "My Documents", getenv("USER"), "my-documents", "expede-explorer ~");
+	add_icon(sh, "My Computer", "Computer", "computer", "expede-explorer computer:");
+	add_icon(sh, "My Network Places", "Network", "network", "pcmanfm-qt network:///");
+	add_icon(sh, "Recycle Bin", NULL, "recycle-empty", "expede-explorer trash:");
 
 	add_item(sh, ITEM_PINNED, "Command Prompt", "cmd", "foot");
 	add_item(sh, ITEM_PINNED, "Windows Explorer", "explorer", "expede-explorer ~");

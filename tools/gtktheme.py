@@ -8,6 +8,7 @@ border-image using the same nine-slice margins the theme file gives.
     python3 -I tools/gtktheme.py [assets dir] [themes dir]
 """
 import os
+import re
 import struct
 import sys
 import zlib
@@ -136,8 +137,24 @@ def nine(name, t, r, b, l):
             f'border-image-repeat: stretch;')
 
 
+def read_ini(path):
+    """[section] key = value text -> {section: {key: value}} (keys lower-cased)."""
+    secs, cur = {}, None
+    for line in open(path, encoding='utf-8', errors='replace'):
+        line = line.split(';', 1)[0].strip()
+        if line.startswith('[') and line.endswith(']'):
+            cur = secs.setdefault(line[1:-1], {})
+        elif cur is not None and '=' in line:
+            k, v = line.split('=', 1)
+            cur[k.strip().lower()] = v.strip()
+    return secs
+
+
 def build(xp, themes):
     luna = os.path.join(xp, 'luna')
+    head = open(os.path.join(luna, 'normalblue.ini'), errors='replace').readline()
+    if 'Windows 7' in head:
+        return build7(xp, themes)
     out = os.path.join(themes, 'Expede-XP')
     t = Theme(luna, os.path.join(out, 'gtk-3.0', 'assets'))
     states4 = ['normal', 'hover', 'active', 'disabled']
@@ -211,6 +228,121 @@ def build(xp, themes):
                 'Comment=Windows XP Luna, drawn from your own Windows files\n\n'
                 '[X-GNOME-Metatheme]\nGtkTheme=Expede-XP\n')
     return out
+
+
+def build7(src, themes):
+    """Windows 7: the same widget set, from w7rip's decompiled aero.msstyles."""
+    luna = os.path.join(src, 'luna')
+    ini = read_ini(os.path.join(luna, 'normalblue.ini'))
+    out = os.path.join(themes, 'Expede-7')
+    t = Theme(luna, os.path.join(out, 'gtk-3.0', 'assets'))
+
+    def name(sec, key='imagefile'):
+        return ini[sec][key].split('\\')[-1].rsplit('.', 1)[0]
+
+    states4 = ['normal', 'hover', 'active', 'disabled']
+    t.frames(name('Button.Pushbutton'), 6, [f'button-{s}' for s in states4] + ['button-default', None])
+    t.frames('checkbox13', 20, [f'check-off-{s}' for s in states4] + [f'check-on-{s}' for s in states4] +
+             [f'check-mixed-{s}' for s in states4] + [None] * 8)
+    t.frames('radiobutton13', 8, [f'radio-off-{s}' for s in states4] + [f'radio-on-{s}' for s in states4])
+    # thumbs carry a gripper on top in Windows 7
+    for d, sec, grip in (('v', 'ScrollBar.ThumbBtnVert', 'ScrollBar.GripperVert'),
+                         ('h', 'ScrollBar.ThumbBtnHorz', 'ScrollBar.GripperHorz')):
+        th, gr = t.img(name(sec)), t.img(name(grip, 'imagefile1'))
+        for i, st in enumerate(states4):
+            t.save(f'thumb-{d}-{st}', overlay(frame(th, 5, i), frame(gr, 5, i)))
+    t.frames(name('ScrollBar.LowerTrackVert'), 5, ['trough-v', None, None, None, None])
+    t.frames(name('ScrollBar.LowerTrackHorz'), 5, ['trough-h', None, None, None, None])
+    t.frames(name('Tab.TopTabItem'), 5, ['tab-normal', 'tab-hover', 'tab-checked', 'tab-disabled', None])
+    t.frames(name('Header.HeaderItem'), int(ini['Header.HeaderItem'].get('imagecount', 3)),
+             ['header-normal', 'header-hover', 'header-active'])
+    t.save('pane', t.img(name('Tab.Pane')))
+    t.save('progress-chunk', t.img(name('Progress.Fill')))
+    t.save('progress-track', t.img(name('Progress.Bar')))
+    t.frames(name('Edit.EditBorderNoScroll'), 4, ['entry-normal', 'entry-hover', 'entry-focus', 'entry-disabled'])
+    t.frames(name('Menu.PopupItem'), 4, [None, 'menuitem-hover', None, None])
+    t.save('tooltip', t.img(name('Tooltip.Standard')))
+    # scroll arrows, combo and spin buttons: background, with the 96 dpi glyph centred on it
+    arrows, glyphs = t.img(name('ScrollBar.ArrowBtn')), t.img(name('ScrollBar.ArrowBtn', 'imagefile1'))
+    for d, dname in enumerate(['up', 'down', 'left', 'right']):
+        for st, sname in enumerate(states4):
+            i = d * 4 + st
+            t.save(f'arrow-{dname}-{sname}', overlay(frame(arrows, 20, i), frame(glyphs, 20, i)))
+    combo, cg = t.img(name('Combobox.DropDownButtonRight')), t.img(name('Combobox.DropDownButtonRight', 'imagefile1'))
+    for st, sname in enumerate(states4):
+        t.save(f'combo-{sname}', overlay(frame(combo, 4, st), frame(cg, 4, st)))
+    for d, sec in (('up', 'Spin.Up'), ('down', 'Spin.Down')):
+        bg, gl = t.img(name(sec)), t.img(name(sec, 'imagefile1'))
+        for st, sname in enumerate(states4):
+            t.save(f'spin-{d}-{sname}', overlay(frame(bg, 4, st), frame(gl, 4, st)))
+    exp = t.img(name('Explorer::TreeView.Glyph', 'imagefile1'))
+    t.save('expander-closed', frame(exp, 2, 0))
+    t.save('expander-open', frame(exp, 2, 1))
+
+    css = CSS + CSS7
+    for k, v in {
+        'Expede XP: Luna': 'Expede 7: Aero', '#ece9d8': '#f0f0f0', '#316ac5': '#3399ff', '#7f9db9': '#abadb3',
+        '#aca899': '#a0a0a0', 'Tahoma, sans-serif': '"Segoe UI", sans-serif', 'font-size: 8pt': 'font-size: 9pt',
+        '@BUTTON@': nine('button-normal', 3, 3, 3, 3), '@BUTTON_HOVER@': nine('button-hover', 3, 3, 3, 3),
+        '@BUTTON_ACTIVE@': nine('button-active', 3, 3, 3, 3), '@BUTTON_DISABLED@': nine('button-disabled', 3, 3, 3, 3),
+        '@BUTTON_DEFAULT@': nine('button-default', 3, 3, 3, 3),
+        '@THUMB_V@': nine('thumb-v-normal', 3, 3, 3, 3), '@THUMB_V_HOVER@': nine('thumb-v-hover', 3, 3, 3, 3),
+        '@THUMB_V_ACTIVE@': nine('thumb-v-active', 3, 3, 3, 3),
+        '@THUMB_H@': nine('thumb-h-normal', 3, 3, 3, 3), '@THUMB_H_HOVER@': nine('thumb-h-hover', 3, 3, 3, 3),
+        '@THUMB_H_ACTIVE@': nine('thumb-h-active', 3, 3, 3, 3),
+        '@TROUGH_V@': nine('trough-v', 0, 1, 0, 1), '@TROUGH_H@': nine('trough-h', 1, 0, 1, 0),
+        '@TAB@': nine('tab-normal', 3, 3, 3, 3), '@TAB_HOVER@': nine('tab-hover', 3, 3, 3, 3),
+        '@TAB_CHECKED@': nine('tab-checked', 3, 3, 3, 3),
+        '@PANE@': nine('pane', 2, 2, 2, 2), '@HEADER@': nine('header-normal', 2, 2, 2, 2),
+        '@HEADER_HOVER@': nine('header-hover', 2, 2, 2, 2), '@HEADER_ACTIVE@': nine('header-active', 2, 2, 2, 2),
+        '@TRACK@': nine('progress-track', 3, 3, 3, 3), '@TOOLBAR@': 'background: none;',
+        '@ENTRY@': nine('entry-normal', 2, 2, 2, 2), '@ENTRY_HOVER@': nine('entry-hover', 2, 2, 2, 2),
+        '@ENTRY_FOCUS@': nine('entry-focus', 2, 2, 2, 2), '@MENUITEM_HOVER@': nine('menuitem-hover', 3, 3, 3, 3),
+        '@TOOLTIP@': nine('tooltip', 3, 3, 3, 3), '@FILL@': nine('progress-chunk', 3, 3, 3, 3),
+    }.items():
+        css = css.replace(k, v)
+    css = re.sub(r'@URL_([a-z0-9-]+)@', lambda m: url(m.group(1)), css)
+    gtk3 = os.path.join(out, 'gtk-3.0')
+    with open(os.path.join(gtk3, 'gtk.css'), 'w') as f:
+        f.write(css)
+    gtk4 = os.path.join(out, 'gtk-4.0')
+    os.makedirs(gtk4, exist_ok=True)
+    if os.path.lexists(os.path.join(gtk4, 'assets')):
+        os.remove(os.path.join(gtk4, 'assets'))
+    os.symlink('../gtk-3.0/assets', os.path.join(gtk4, 'assets'))
+    with open(os.path.join(gtk4, 'gtk.css'), 'w') as f:
+        f.write(re.sub(r'^\s*-GtkScrollbar[^\n]*\n', '', css, flags=re.M))
+    with open(os.path.join(out, 'index.theme'), 'w') as f:
+        f.write('[Desktop Entry]\nType=X-GNOME-Metatheme\nName=Expede 7\n'
+                'Comment=Windows 7 Aero, drawn from your own Windows files\n\n'
+                '[X-GNOME-Metatheme]\nGtkTheme=Expede-7\n')
+    return out
+
+
+# Windows 7 differences, appended after the shared rules so they win
+CSS7 = r'''
+/* ---------------- Windows 7 */
+entry, spinbutton:not(.vertical) { @ENTRY@ background-color: #ffffff; padding: 2px 4px; }
+entry:hover { @ENTRY_HOVER@ }
+entry:focus, entry:focus-within { @ENTRY_FOCUS@ }
+progressbar trough { min-height: 13px; }
+progressbar progress { @FILL@ background-image: none; margin: 1px; min-height: 11px; }
+menu, .menu, .context-menu, popover.menu > contents {
+	background-color: #f0f0f0; border: 1px solid #979797; padding: 2px; box-shadow: 2px 2px 3px alpha(#000000, 0.3);
+}
+menu menuitem:hover, popover.menu modelbutton:hover { @MENUITEM_HOVER@ background: none; color: #000000; }
+menubar { background-color: #f0f0f0; }
+menubar > menuitem:hover, menubar > item:hover { @MENUITEM_HOVER@ background: none; color: #000000; }
+tooltip, tooltip.background { @TOOLTIP@ background: none; background-color: transparent; color: #575757; }
+tooltip * { color: #575757; }
+*:selected, selection, treeview.view:selected, row:selected, list > row:selected {
+	background-color: #cce8ff; color: #000000;
+}
+entry selection, textview text selection, label selection { background-color: #3399ff; color: #ffffff; }
+statusbar { background-color: #f0f0f0; border-top: 1px solid #d7d7d7; }
+headerbar, .titlebar:not(headerbar) { background: #f0f0f0; border-bottom: 1px solid #d7d7d7; }
+frame > border, .frame { border: 1px solid #d5dfe5; border-radius: 3px; }
+'''
 
 
 CSS = r'''/* Expede XP: Luna for GTK, generated by tools/gtktheme.py from your ripped theme */

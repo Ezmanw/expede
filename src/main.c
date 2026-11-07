@@ -6,6 +6,7 @@
 #include <getopt.h>
 #include <linux/input-event-codes.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
@@ -84,18 +85,47 @@ static struct icon_set icon_for_app(struct theme *t, const char *app_id) {
 	return theme_icon(t, "app");
 }
 
+struct theme *theme_of(struct server *s, int style) {
+	if ((style == 7 && s->have7) || !s->have_xp)
+		return &s->theme7;
+	return &s->theme;
+}
+
+int taskbar_h(struct server *s) {
+	return theme_of(s, s->st_taskbar)->version == 7 ? 40 : TASKBAR_H;
+}
+
+/* Windows 7 frames: 8px glass borders and a 30px caption (22 when maximized) */
+#define W7_BORDER 8
+#define W7_CAPTION 30
+static bool w7(struct view *v) {
+	return theme_of(v->server, v->server->st_frames)->version == 7;
+}
+
 /* Frame sizes. Apps that draw their own title bar (GTK4, Chromium, Electron...)
- * get no Luna frame at all, so there is never a second title bar. */
+ * get no frame at all, so there is never a second title bar. */
 static int side_w(struct view *v) {
-	return v->csd || v->fullscreen || v->maximized ? 0 : BORDER;
+	return v->csd || v->fullscreen || v->maximized ? 0 : w7(v) ? W7_BORDER : BORDER;
 }
 
 static int caption_h(struct view *v) {
-	return v->csd || v->fullscreen ? 0 : v->maximized ? CAPTION - BORDER : CAPTION;
+	if (v->csd || v->fullscreen)
+		return 0;
+	if (w7(v))
+		return v->maximized ? 22 : W7_CAPTION;
+	return v->maximized ? CAPTION - BORDER : CAPTION;
 }
 
 static int bottom_h(struct view *v) {
-	return v->csd || v->fullscreen || v->maximized ? 0 : BORDER;
+	return v->csd || v->fullscreen || v->maximized ? 0 : w7(v) ? W7_BORDER : BORDER;
+}
+
+/* Windows 7 caption buttons hang from the top edge: min and max 26 wide, close 45 */
+static void w7_buttons(struct view *v, int fw, struct wlr_box *mn, struct wlr_box *mx, struct wlr_box *cl) {
+	int y = v->maximized ? 0 : 1, h = v->maximized ? 19 : 20, r = fw - (v->maximized ? 2 : 6);
+	*cl = (struct wlr_box){r - 45, y, 45, h};
+	*mx = (struct wlr_box){cl->x - 26, y, 26, h};
+	*mn = (struct wlr_box){mx->x - 26, y, 26, h};
 }
 
 static int view_frame_w(struct view *v) {
@@ -103,11 +133,20 @@ static int view_frame_w(struct view *v) {
 }
 
 static enum part button_at(struct view *v, double lx, double ly) {
-	struct theme *t = &v->server->theme;
+	struct theme *t = theme_of(v->server, v->server->st_frames);
 	if (v->csd || v->fullscreen)
 		return PART_NONE;
 	int fw = view_frame_w(v);
 	double x = lx - v->x, y = ly - v->y;
+	if (w7(v)) {
+		struct wlr_box b[3];
+		w7_buttons(v, fw, &b[0], &b[1], &b[2]);
+		static const enum part parts[3] = {PART_MIN, PART_MAX, PART_CLOSE};
+		for (int i = 0; i < 3; i++)
+			if (x >= b[i].x && x < b[i].x + b[i].width && y >= b[i].y && y < b[i].y + b[i].height)
+				return parts[i];
+		return PART_NONE;
+	}
 	int by = v->maximized ? 2 : 5;
 	if (y < by || y >= by + 21)
 		return PART_NONE;
@@ -145,8 +184,212 @@ static void place_content(struct view *v) {
 	wlr_scene_node_set_position(&v->content->node, side_w(v), caption_h(v));
 }
 
+/* ---- Windows 7 glass ---- */
+
+static void round_path(cairo_t *cr, double x, double y, double w, double h, double rt, double rb) {
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x + w - rt, y + rt, rt, -M_PI / 2, 0);
+	cairo_arc(cr, x + w - rb, y + h - rb, rb, 0, M_PI / 2);
+	cairo_arc(cr, x + rb, y + h - rb, rb, M_PI / 2, M_PI);
+	cairo_arc(cr, x + rt, y + rt, rt, M_PI, 3 * M_PI / 2);
+	cairo_close_path(cr);
+}
+
+void draw_glass(struct server *s, cairo_t *cr, double x, double y, double w, double h, double rt, double rb,
+		bool active) {
+	double r = ((s->glass_rgb >> 16) & 255) / 255.0, g = ((s->glass_rgb >> 8) & 255) / 255.0,
+		b = (s->glass_rgb & 255) / 255.0, k = s->glass_intensity / 100.0;
+	cairo_save(cr);
+	round_path(cr, x, y, w, h, rt, rb);
+	cairo_clip_preserve(cr);
+	if (s->opt_glass) {
+		/* over the blurred desktop: a milky layer, then the window colour */
+		cairo_set_source_rgba(cr, 1, 1, 1, active ? 0.16 : 0.32);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgba(cr, r, g, b, active ? 0.18 + 0.6 * k : 0.06 + 0.25 * k);
+	} else {
+		/* transparency off: the colour over Windows 7's light grey, opaque */
+		cairo_set_source_rgb(cr, 0.85, 0.88, 0.92);
+		cairo_fill_preserve(cr);
+		cairo_set_source_rgba(cr, r, g, b, active ? 0.22 + 0.6 * k : 0.08 + 0.25 * k);
+	}
+	cairo_fill(cr);
+	struct theme *t = &s->theme7;
+	if (t->w7_reflect) {
+		cairo_set_source_surface(cr, t->w7_reflect, x, y);
+		cairo_paint_with_alpha(cr, active ? 1 : 0.6);
+	}
+	cairo_pattern_t *p = cairo_pattern_create_linear(0, y, 0, y + 26);
+	cairo_pattern_add_color_stop_rgba(p, 0, 1, 1, 1, active ? 0.30 : 0.2);
+	cairo_pattern_add_color_stop_rgba(p, 1, 1, 1, 1, 0);
+	cairo_set_source(cr, p);
+	cairo_rectangle(cr, x, y, w, 26);
+	cairo_fill(cr);
+	cairo_pattern_destroy(p);
+	cairo_restore(cr);
+	cairo_set_line_width(cr, 1);
+	round_path(cr, x + 0.5, y + 0.5, w - 1, h - 1, rt, rb);
+	cairo_set_source_rgba(cr, 0, 0, 0, active ? 0.6 : 0.4);
+	cairo_stroke(cr);
+	round_path(cr, x + 1.5, y + 1.5, w - 3, h - 3, rt > 1 ? rt - 1 : 0, rb > 1 ? rb - 1 : 0);
+	cairo_set_source_rgba(cr, 1, 1, 1, active ? 0.55 : 0.4);
+	cairo_stroke(cr);
+}
+
+/* soft white haze behind caption text, so black titles read on any glass */
+static void title_glow(cairo_t *cr, double x, double y, double w, double h) {
+	for (int i = 6; i >= 1; i--) {
+		round_path(cr, x - i * 2, y - i, w + i * 4, h + i * 2, h / 2 + i, h / 2 + i);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+		cairo_fill(cr);
+	}
+}
+
+static void w7_caption_button(struct theme *t, cairo_t *cr, struct wlr_box b, int which, int glyph, bool active,
+		bool hot, bool pressed) {
+	int f = pressed ? 2 : hot ? 1 : 0;
+	if (hot || pressed) {
+		/* the hover glow spills past the button */
+		struct image *gl = &t->w7_glow[which == 2];
+		draw_image(cr, gl, 0, b.x - 8, b.y - 1, b.width + 16, b.height + 9);
+	}
+	draw_image(cr, &t->w7_btn[!active][which], f, b.x, b.y, b.width, b.height);
+	cairo_surface_t *lo = t->w7_glyph[glyph][0], *hi = t->w7_glyph[glyph][1];
+	if (lo) {
+		int gw = cairo_image_surface_get_width(lo), gh = frame_height(lo, 4);
+		draw_frame_dpi(cr, lo, hi, 4, active ? f : 0, b.x + (b.width - gw) / 2, b.y + (b.height - gh) / 2);
+	}
+}
+
+/* one piece of the frame: the whole frame is drawn, clipped to the piece */
+static cairo_surface_t *w7_piece(struct view *v, int px, int py, int pw, int ph) {
+	struct server *s = v->server;
+	struct theme *t = &s->theme7;
+	int fw = view_frame_w(v), caph = caption_h(v), fh = caph + v->ch + bottom_h(v);
+	cairo_surface_t *c = canvas_new(pw, ph);
+	cairo_t *cr = cairo_create(c);
+	cairo_translate(cr, -px, -py);
+	cairo_rectangle(cr, px, py, pw, ph);
+	cairo_clip(cr);
+	bool max = v->maximized;
+	draw_glass(s, cr, max ? -2 : 0, max ? -2 : 0, max ? fw + 4 : fw, max ? fh + 4 : fh, max ? 0 : 6,
+		max ? 0 : 3, v->active);
+	/* the client sits in a thin light line, then a dark one */
+	int sw = side_w(v);
+	cairo_set_line_width(cr, 1);
+	cairo_rectangle(cr, sw - 1.5, caph - 1.5, v->cw + 3, v->ch + 3);
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.45);
+	cairo_stroke(cr);
+	cairo_rectangle(cr, sw - 0.5, caph - 0.5, v->cw + 1, v->ch + 1);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.4);
+	cairo_stroke(cr);
+	if (py < caph) {
+		struct wlr_box mn, mx, cl;
+		w7_buttons(v, fw, &mn, &mx, &cl);
+		int ix = max ? 4 : 9, iy = (caph - 16) / 2 + (max ? 0 : 1);
+		if (v->icon.s16)
+			draw_surface(cr, v->icon.s16, ix, iy);
+		const char *title = v->xt->title && *v->xt->title ? v->xt->title : "Untitled";
+		theme_use_fonts(t);
+		int tx = ix + 21, tmax = mn.x - tx - 8;
+		int tw = text_width("Segoe UI 9", title);
+		if (tw > tmax)
+			tw = tmax;
+		if (tw > 0) {
+			title_glow(cr, tx, iy - 1, tw, 18);
+			draw_text(cr, "Segoe UI 9", title, tx, iy - 1, tmax, v->active ? 0x000000 : 0x444444, 0, 0, 0, false);
+		}
+		w7_caption_button(t, cr, mn, 0, 2, v->active, v->hot == PART_MIN, v->pressed == PART_MIN);
+		w7_caption_button(t, cr, mx, 1, max ? 3 : 1, v->active, v->hot == PART_MAX, v->pressed == PART_MAX);
+		w7_caption_button(t, cr, cl, 2, 0, v->active, v->hot == PART_CLOSE, v->pressed == PART_CLOSE);
+	}
+	cairo_destroy(cr);
+	return c;
+}
+
+static void view_update_glass(struct view *v) {
+	struct server *s = v->server;
+	bool on = w7(v) && s->opt_glass && !v->csd && !v->fullscreen;
+	int fw = view_frame_w(v), caph = caption_h(v), sw = side_w(v), bh = bottom_h(v), r = v->maximized ? 0 : 6;
+	struct wlr_box pieces[5] = {
+		{r, 0, fw - 2 * r, r}, {0, r, fw, caph - r},
+		{0, caph, sw, v->ch}, {sw + v->cw, caph, sw, v->ch}, {0, caph + v->ch, fw, bh},
+	};
+	for (int i = 0; i < 5; i++) {
+		struct wlr_box b = pieces[i];
+		if (!on || b.width <= 0 || b.height <= 0) {
+			if (v->glass[i])
+				wlr_scene_node_set_enabled(&v->glass[i]->node, false);
+			continue;
+		}
+		glass_backdrop(s, &v->glass[i], v->tree, b.x, b.y, v->x + b.x, v->y + b.y, b.width, b.height);
+		if (v->glass[i])
+			wlr_scene_node_lower_to_bottom(&v->glass[i]->node);
+	}
+}
+
+void glass_backdrop(struct server *s, struct wlr_scene_buffer **node, struct wlr_scene_tree *parent,
+		int px, int py, int x, int y, int w, int h) {
+	if (!s->glass_buf || !s->opt_glass) {
+		if (*node)
+			wlr_scene_node_set_enabled(&(*node)->node, false);
+		return;
+	}
+	/* clip to the screen: the source box must stay inside the picture */
+	int sw, sh;
+	server_screen(s, &sw, &sh);
+	int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+	int x1 = x + w > sw ? sw : x + w, y1 = y + h > sh ? sh : y + h;
+	if (x1 <= x0 || y1 <= y0) {
+		if (*node)
+			wlr_scene_node_set_enabled(&(*node)->node, false);
+		return;
+	}
+	if (!*node)
+		*node = wlr_scene_buffer_create(parent, s->glass_buf);
+	else if ((*node)->buffer != s->glass_buf)
+		wlr_scene_buffer_set_buffer(*node, s->glass_buf);
+	double bw = s->glass_buf->width, bh = s->glass_buf->height;
+	struct wlr_fbox src = {x0 * bw / sw, y0 * bh / sh, (x1 - x0) * bw / sw, (y1 - y0) * bh / sh};
+	if (src.x + src.width > bw) src.width = bw - src.x;
+	if (src.y + src.height > bh) src.height = bh - src.y;
+	wlr_scene_buffer_set_source_box(*node, &src);
+	wlr_scene_buffer_set_dest_size(*node, x1 - x0, y1 - y0);
+	wlr_scene_node_set_position(&(*node)->node, px + (x0 - x), py + (y0 - y));
+	wlr_scene_node_set_enabled(&(*node)->node, true);
+}
+
+static void view_redraw_w7(struct view *v) {
+	int fw = view_frame_w(v), caph = caption_h(v), sw = side_w(v), bh = bottom_h(v);
+	set_deco(&v->deco[0], v->tree, w7_piece(v, 0, 0, fw, caph), 0, 0);
+	if (v->maximized) {
+		for (int i = 1; i < 4; i++)
+			if (v->deco[i])
+				wlr_scene_node_set_enabled(&v->deco[i]->node, false);
+	} else {
+		set_deco(&v->deco[1], v->tree, w7_piece(v, 0, caph, sw, v->ch), 0, caph);
+		set_deco(&v->deco[2], v->tree, w7_piece(v, sw + v->cw, caph, sw, v->ch), sw + v->cw, caph);
+		set_deco(&v->deco[3], v->tree, w7_piece(v, 0, caph + v->ch, fw, bh), 0, caph + v->ch);
+	}
+	view_update_glass(v);
+}
+
+/* move a window's node, keeping its glass in step with the desktop behind it */
+static void view_move_node(struct view *v) {
+	wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
+	if (v->glass[0] || (w7(v) && v->server->opt_glass))
+		view_update_glass(v);
+}
+
+void server_glass_changed(struct server *s) {
+	struct view *v;
+	wl_list_for_each(v, &s->views, link)
+		if (v->mapped)
+			view_update_glass(v);
+}
+
 static void view_redraw(struct view *v) {
-	struct theme *t = &v->server->theme;
+	struct theme *t = theme_of(v->server, v->server->st_frames);
 	if (v->csd || v->fullscreen) {
 		for (int i = 0; i < 4; i++)
 			if (v->deco[i])
@@ -154,6 +397,14 @@ static void view_redraw(struct view *v) {
 		place_content(v);
 		return;
 	}
+	if (w7(v)) {
+		view_redraw_w7(v);
+		place_content(v);
+		return;
+	}
+	for (int i = 0; i < 5; i++)
+		if (v->glass[i])
+			wlr_scene_node_set_enabled(&v->glass[i]->node, false);
 	int fw = view_frame_w(v);
 	int frame = v->active ? 0 : 1;
 	int caph = caption_h(v);
@@ -191,13 +442,13 @@ static void view_redraw(struct view *v) {
 		cr = cairo_create(s);
 		draw_image(cr, sides[i], frame, 0, 0, BORDER, v->ch);
 		cairo_destroy(cr);
-		set_deco(&v->deco[1 + i], v->tree, s, i ? BORDER + v->cw : 0, CAPTION);
+		set_deco(&v->deco[1 + i], v->tree, s, i ? BORDER + v->cw : 0, caph);
 	}
 	s = canvas_new(fw, BORDER);
 	cr = cairo_create(s);
 	draw_image(cr, &t->frame_bottom, frame, 0, 0, fw, BORDER);
 	cairo_destroy(cr);
-	set_deco(&v->deco[3], v->tree, s, 0, CAPTION + v->ch);
+	set_deco(&v->deco[3], v->tree, s, 0, caph + v->ch);
 	place_content(v);
 }
 
@@ -272,7 +523,7 @@ static void view_set_maximized(struct view *v, bool max) {
 		v->maximized = true;
 		v->x = 0;
 		v->y = 0;
-		wlr_xdg_toplevel_set_size(v->xt, sw, sh - TASKBAR_H - caption_h(v));
+		wlr_xdg_toplevel_set_size(v->xt, sw, sh - taskbar_h(v->server) - caption_h(v));
 	} else {
 		v->maximized = false;
 		v->x = v->saved.x;
@@ -280,7 +531,7 @@ static void view_set_maximized(struct view *v, bool max) {
 		wlr_xdg_toplevel_set_size(v->xt, v->saved.width, v->saved.height);
 	}
 	wlr_xdg_toplevel_set_maximized(v->xt, max);
-	wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
+	view_move_node(v);
 	view_redraw(v);
 }
 
@@ -303,12 +554,12 @@ static void view_set_fullscreen(struct view *v, bool on) {
 		v->y = v->pre_fullscreen.y;
 		wlr_scene_node_reparent(&v->tree->node, s->layer_views);
 		if (v->maximized)
-			wlr_xdg_toplevel_set_size(v->xt, sw, sh - TASKBAR_H - caption_h(v));
+			wlr_xdg_toplevel_set_size(v->xt, sw, sh - taskbar_h(v->server) - caption_h(v));
 		else
 			wlr_xdg_toplevel_set_size(v->xt, v->pre_fullscreen.width, v->pre_fullscreen.height);
 	}
 	wlr_xdg_toplevel_set_fullscreen(v->xt, on);
-	wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
+	view_move_node(v);
 	view_redraw(v);
 }
 
@@ -323,7 +574,7 @@ enum { SNAP_NONE, SNAP_MAX, SNAP_LEFT, SNAP_RIGHT };
 static struct wlr_box snap_area(struct server *s, int zone) {
 	int sw, sh;
 	server_screen(s, &sw, &sh);
-	int h = sh - TASKBAR_H;
+	int h = sh - taskbar_h(s);
 	switch (zone) {
 	case SNAP_LEFT: return (struct wlr_box){0, 0, sw / 2, h};
 	case SNAP_RIGHT: return (struct wlr_box){sw - sw / 2, 0, sw / 2, h};
@@ -359,7 +610,7 @@ static void view_snap(struct view *v, int zone) {
 	v->x = a.x;
 	v->y = a.y;
 	wlr_xdg_toplevel_set_size(v->xt, a.width - 2 * side_w(v), a.height - caption_h(v) - bottom_h(v));
-	wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
+	view_move_node(v);
 }
 
 static enum wlr_xdg_toplevel_decoration_v1_mode deco_mode_for(struct view *v) {
@@ -404,11 +655,11 @@ static void on_map(struct wl_listener *l, void *data) {
 	v->y = 30 + (cascade % 8) * 26;
 	cascade++;
 	if (v->x + v->cw > sw) v->x = 0;
-	if (v->y + v->ch + caption_h(v) > sh - TASKBAR_H) v->y = 0;
-	wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
+	if (v->y + v->ch + caption_h(v) > sh - taskbar_h(v->server)) v->y = 0;
+	view_move_node(v);
 	v->mapped = true;
 	wlr_scene_node_set_enabled(&v->tree->node, true);
-	v->icon = icon_for_app(&v->server->theme, v->xt->app_id);
+	v->icon = icon_for_app(theme_of(v->server, v->server->st_icons), v->xt->app_id);
 	wlr_log(WLR_DEBUG, "mapped \"%s\" (app_id %s)", v->xt->title ? v->xt->title : "", v->xt->app_id ? v->xt->app_id : "none");
 	view_focus(v);
 	/* apps can ask for fullscreen before their first frame (foot --fullscreen, kiosk modes) */
@@ -448,7 +699,7 @@ static void on_commit(struct wl_listener *l, void *data) {
 				v->x += v->cw - g.width;
 			if (v->server->resize_edges & WLR_EDGE_TOP)
 				v->y += v->ch - g.height;
-			wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
+			view_move_node(v);
 		}
 		v->cw = g.width;
 		v->ch = g.height;
@@ -531,7 +782,7 @@ static void on_set_title(struct wl_listener *l, void *data) {
 
 static void on_set_app_id(struct wl_listener *l, void *data) {
 	struct view *v = wl_container_of(l, v, set_app_id);
-	v->icon = icon_for_app(&v->server->theme, v->xt->app_id);
+	v->icon = icon_for_app(theme_of(v->server, v->server->st_icons), v->xt->app_id);
 	if (v->mapped)
 		view_redraw(v);
 }
@@ -705,10 +956,11 @@ static uint32_t border_edges(struct view *v, double lx, double ly) {
 		return 0; /* the app's own frame handles its resize edges */
 	int fw = view_frame_w(v), fh = v->ch + caption_h(v) + bottom_h(v);
 	uint32_t e = 0;
-	if (x < BORDER) e |= WLR_EDGE_LEFT;
-	if (x >= fw - BORDER) e |= WLR_EDGE_RIGHT;
-	if (y < BORDER) e |= WLR_EDGE_TOP;
-	if (y >= fh - BORDER) e |= WLR_EDGE_BOTTOM;
+	int bw = w7(v) ? W7_BORDER : BORDER;
+	if (x < bw) e |= WLR_EDGE_LEFT;
+	if (x >= fw - bw) e |= WLR_EDGE_RIGHT;
+	if (y < (w7(v) ? 5 : BORDER)) e |= WLR_EDGE_TOP;
+	if (y >= fh - bw) e |= WLR_EDGE_BOTTOM;
 	return e;
 }
 
@@ -770,7 +1022,7 @@ static void process_motion(struct server *s, uint32_t time) {
 		}
 		v->x = s->grab_box.x + (lx - s->grab_x);
 		v->y = s->grab_box.y + (ly - s->grab_y);
-		wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
+		view_move_node(v);
 		if (s->opt_snap) {
 			int sw, sh;
 			server_screen(s, &sw, &sh);
@@ -1330,8 +1582,42 @@ static const char *default_assets(void) {
  *   keyboard_layout = gb   any XKB layout, optionally "gb(extd)" style variant
  *   screen_off = 10        minutes idle before the screens switch off (0 = never)
  *   output.HDMI-A-1.mode = 1920x1080@60     output.eDP-1.enabled = false */
+/* "xp", "7" or "auto" (follow the main style) */
+static int conf_style(const char *v) {
+	if (!strcasecmp(v, "7") || !strcasecmp(v, "win7") || !strcasecmp(v, "windows7"))
+		return 7;
+	if (!strcasecmp(v, "xp"))
+		return 0;
+	return -1;
+}
+
+/* Windows 7's window colours (Personalization > Window Color) */
+static const struct { const char *name; uint32_t rgb; } glass_colors[] = {
+	{"sky", 0x74b8fc}, {"twilight", 0x3a6fd8}, {"sea", 0x3fb6c9}, {"leaf", 0x5fc35f}, {"lime", 0xb3d736},
+	{"sun", 0xf6d33c}, {"pumpkin", 0xf89e38}, {"blush", 0xef6a8e}, {"violet", 0xc160d3}, {"lavender", 0xa69bd9},
+	{"taupe", 0xa89f8a}, {"chocolate", 0x7a5737}, {"slate", 0x6f7b88}, {"frost", 0xe4eaf0}, {"ruby", 0xd02f3b},
+};
+
+static uint32_t conf_color(const char *v) {
+	for (size_t i = 0; i < sizeof(glass_colors) / sizeof(glass_colors[0]); i++)
+		if (!strcasecmp(v, glass_colors[i].name))
+			return glass_colors[i].rgb;
+	return (uint32_t)strtoul(v[0] == '#' ? v + 1 : v, NULL, 16) & 0xffffff;
+}
+
 static bool conf_true(const char *v) {
 	return !strcasecmp(v, "true") || !strcasecmp(v, "yes") || !strcasecmp(v, "on") || !strcmp(v, "1");
+}
+
+static void resolve_styles(struct server *s, bool wall_set) {
+	int *parts[] = {&s->st_frames, &s->st_taskbar, &s->st_start, &s->st_logon, &s->st_sounds, &s->st_cursors,
+		&s->st_icons};
+	for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++)
+		if (*parts[i] < 0 || (*parts[i] == 7 && !s->have7) || (*parts[i] == 0 && !s->have_xp))
+			*parts[i] = s->style;
+	/* each version opens on its own default wallpaper */
+	if (!wall_set)
+		snprintf(s->opt_wallpaper, sizeof(s->opt_wallpaper), "%s", s->style == 7 ? "Windows 7.jpg" : "Bliss.jpg");
 }
 
 static void load_config(struct server *s) {
@@ -1347,6 +1633,13 @@ static void load_config(struct server *s) {
 	s->opt_keyboard[0] = 0;
 	s->opt_screen_off = 10;
 	s->n_out_conf = 0;
+	/* Windows version: XP unless only Windows 7 has been ripped */
+	s->style = s->have_xp ? 0 : 7;
+	s->st_frames = s->st_taskbar = s->st_start = s->st_logon = s->st_sounds = s->st_cursors = s->st_icons = -1;
+	s->opt_glass = true;
+	s->glass_rgb = 0x74b8fc;
+	s->glass_intensity = 45;
+	bool wall_set = false;
 	char path[512];
 	const char *xdg = getenv("XDG_CONFIG_HOME");
 	if (xdg && *xdg)
@@ -1385,8 +1678,32 @@ static void load_config(struct server *s) {
 			s->opt_sounds = conf_true(val);
 		else if (!strcmp(key, "clock"))
 			s->opt_clock24 = !strcmp(val, "24");
-		else if (!strcmp(key, "wallpaper"))
+		else if (!strcmp(key, "wallpaper")) {
 			snprintf(s->opt_wallpaper, sizeof(s->opt_wallpaper), "%s", !strcasecmp(val, "none") ? "" : val);
+			wall_set = true;
+		}
+		else if (!strcmp(key, "style"))
+			s->style = conf_style(val) == 7 && s->have7 ? 7 : s->have_xp ? 0 : 7;
+		else if (!strcmp(key, "glass"))
+			s->opt_glass = conf_true(val);
+		else if (!strcmp(key, "glass_color"))
+			s->glass_rgb = conf_color(val);
+		else if (!strcmp(key, "glass_intensity"))
+			s->glass_intensity = atoi(val) < 0 ? 0 : atoi(val) > 100 ? 100 : atoi(val);
+		else if (!strcmp(key, "frames"))
+			s->st_frames = conf_style(val);
+		else if (!strcmp(key, "taskbar"))
+			s->st_taskbar = conf_style(val);
+		else if (!strcmp(key, "start_menu"))
+			s->st_start = conf_style(val);
+		else if (!strcmp(key, "logon"))
+			s->st_logon = conf_style(val);
+		else if (!strcmp(key, "sound_scheme"))
+			s->st_sounds = conf_style(val);
+		else if (!strcmp(key, "pointers"))
+			s->st_cursors = conf_style(val);
+		else if (!strcmp(key, "icons"))
+			s->st_icons = conf_style(val);
 		else if (!strcmp(key, "wallpaper_style"))
 			snprintf(s->opt_wallpaper_style, sizeof(s->opt_wallpaper_style), "%s", val);
 		else if (!strcmp(key, "user_picture"))
@@ -1416,6 +1733,54 @@ static void load_config(struct server *s) {
 			snprintf(s->opt_keyboard, sizeof(s->opt_keyboard), "%s", val);
 	}
 	fclose(f);
+	resolve_styles(s, wall_set);
+}
+
+/* The desktop follows the icon style; a wallpaper or picture named in the other
+ * version's folder is found there too. */
+static void apply_desktop(struct server *s) {
+	struct theme *t = theme_of(s, s->st_icons), *other = t == &s->theme ? &s->theme7 : &s->theme;
+	char path[1024];
+	const char *wall = s->opt_wallpaper;
+	if (*wall && wall[0] != '/') {
+		snprintf(path, sizeof(path), "%s/wallpapers/%s", t->dir, wall);
+		if (access(path, R_OK) != 0 && other->dir[0]) {
+			snprintf(path, sizeof(path), "%s/wallpapers/%s", other->dir, wall);
+			if (access(path, R_OK) == 0)
+				wall = path;
+		}
+	}
+	theme_set_wallpaper(t, wall, s->opt_wallpaper_style);
+	/* the account picture may be one of either version's; both Start menus show it */
+	struct theme *pt = t;
+	if (s->opt_user_picture[0] && other->dir[0]) {
+		snprintf(path, sizeof(path), "%s/pictures/%s.png", t->dir, s->opt_user_picture);
+		if (access(path, R_OK) != 0)
+			pt = other;
+	}
+	theme_set_user_picture(pt, s->opt_user_picture);
+	struct theme *dst = pt == t ? other : t;
+	if (dst->dir[0] && pt->user_pic) {
+		if (dst->user_pic)
+			cairo_surface_destroy(dst->user_pic);
+		dst->user_pic = cairo_surface_reference(pt->user_pic);
+	}
+}
+
+/* pointers and the GTK theme for apps started from now on */
+static void apply_env(struct server *s) {
+	const char *cur = s->st_cursors == 7 ? "expede-7" : "expede-xp";
+	setenv("XCURSOR_THEME", cur, true);
+	if (strcmp(cur, s->cursor_theme)) {
+		snprintf(s->cursor_theme, sizeof(s->cursor_theme), "%s", cur);
+		if (s->cursor_mgr) {
+			wlr_xcursor_manager_destroy(s->cursor_mgr);
+			s->cursor_mgr = wlr_xcursor_manager_create(cur, 32);
+			wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "default");
+		}
+	}
+	if (s->own_gtk_theme)
+		setenv("GTK_THEME", s->style == 7 ? "Expede-7" : "Expede-XP", true);
 }
 
 /* expede-settings sends SIGHUP after saving, so changes apply without logging off */
@@ -1463,8 +1828,8 @@ static int on_sighup(int sig, void *data) {
 	struct keyboard *k;
 	wl_list_for_each(k, &s->keyboards, link)
 		apply_keymap(s, k->wlr_keyboard);
-	theme_set_wallpaper(&s->theme, s->opt_wallpaper, s->opt_wallpaper_style);
-	theme_set_user_picture(&s->theme, s->opt_user_picture);
+	apply_desktop(s);
+	apply_env(s);
 	session_layout(s->session);
 	struct output *o;
 	wl_list_for_each(o, &s->outputs, link) {
@@ -1499,6 +1864,18 @@ static int on_sighup(int sig, void *data) {
 		}
 	}
 	shell_reconfigure(s->shell);
+	/* frames may have changed version or colour */
+	struct view *v;
+	wl_list_for_each(v, &s->views, link) {
+		if (!v->mapped)
+			continue;
+		if (v->maximized) {
+			v->maximized = false;
+			view_set_maximized(v, true);
+		} else {
+			view_redraw(v);
+		}
+	}
 	if (s->opt_snap == false)
 		snap_preview(s, SNAP_NONE);
 	reset_idle(s);
@@ -1525,20 +1902,27 @@ int main(int argc, char *argv[]) {
 
 	struct server s = {0};
 	the_server = &s;
-	load_config(&s);
-	if (!theme_load(&s.theme, default_assets()))
+	/* <data>/expede/xp from xprip, <data>/expede/7 from w7rip: either or both */
+	char dir7[600];
+	snprintf(dir7, sizeof(dir7), "%s", default_assets());
+	char *slash = strrchr(dir7, '/');
+	if (slash)
+		snprintf(slash + 1, sizeof(dir7) - (slash + 1 - dir7), "7");
+	s.have_xp = theme_load(&s.theme, default_assets());
+	s.have7 = theme_load(&s.theme7, dir7) && s.theme7.version == 7;
+	if (!s.have_xp && !s.have7)
 		return 1;
-	/* XP's own pointers (xprip turns user32.dll's cursors into an Xcursor theme);
-	 * exported so client-drawn cursors match too */
-	char cpath[640];
+	load_config(&s);
+	/* the pointers each rip turned into Xcursor themes; exported so client-drawn cursors match */
+	char cpath[1400];
 	const char *old = getenv("XCURSOR_PATH");
-	snprintf(cpath, sizeof(cpath), "%s/cursors:%s", default_assets(),
+	snprintf(cpath, sizeof(cpath), "%s/cursors:%s/cursors:%s", default_assets(), dir7,
 		old ? old : "/usr/share/icons:/usr/share/pixmaps");
 	setenv("XCURSOR_PATH", cpath, true);
-	setenv("XCURSOR_THEME", "expede-xp", true);
 	setenv("XCURSOR_SIZE", "32", true);
-	theme_set_wallpaper(&s.theme, s.opt_wallpaper, s.opt_wallpaper_style);
-	theme_set_user_picture(&s.theme, s.opt_user_picture);
+	s.own_gtk_theme = !getenv("GTK_THEME");
+	apply_env(&s);
+	apply_desktop(&s);
 
 	s.display = wl_display_create();
 	s.backend = wlr_backend_autocreate(wl_display_get_event_loop(s.display), NULL);
@@ -1583,7 +1967,7 @@ int main(int argc, char *argv[]) {
 
 	s.cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(s.cursor, s.output_layout);
-	s.cursor_mgr = wlr_xcursor_manager_create("expede-xp", 32);
+	s.cursor_mgr = wlr_xcursor_manager_create(s.cursor_theme, 32);
 	s.cursor_motion.notify = on_cursor_motion;
 	wl_signal_add(&s.cursor->events.motion, &s.cursor_motion);
 	s.cursor_motion_abs.notify = on_cursor_motion_abs;
@@ -1629,8 +2013,7 @@ int main(int argc, char *argv[]) {
 	setenv("XDG_CURRENT_DESKTOP", "Expede", true);
 	/* GTK apps draw their own widgets with the theme xprip generated from the same
 	 * Luna bitmaps (only apps started inside Expede; other sessions are untouched) */
-	if (!getenv("GTK_THEME"))
-		setenv("GTK_THEME", "Expede-XP", true);
+	apply_env(&s);
 	/* Qt apps take colours, fonts and dialogs from the GTK theme */
 	if (!getenv("QT_QPA_PLATFORMTHEME"))
 		setenv("QT_QPA_PLATFORMTHEME", "gtk3", true);

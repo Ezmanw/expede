@@ -28,7 +28,7 @@ void scene_show(struct wlr_scene_buffer **node, struct wlr_scene_tree *parent, c
 
 #define BORDER 4
 #define CAPTION 30
-#define TASKBAR_H 30
+#define TASKBAR_H 30 /* XP; Windows 7's superbar is 40 */
 
 enum part { PART_NONE, PART_CAPTION, PART_CLOSE, PART_MAX, PART_MIN, PART_BORDER };
 
@@ -38,6 +38,7 @@ struct view {
 	struct wlr_xdg_toplevel *xt;
 	struct wlr_scene_tree *tree, *content;
 	struct wlr_scene_buffer *deco[4]; /* caption, left, right, bottom */
+	struct wlr_scene_buffer *glass[5]; /* Windows 7: blurred desktop behind the frame */
 	struct icon_set icon;
 	int x, y, cw, ch;
 	bool mapped, minimized, maximized, active, snapped;
@@ -70,7 +71,18 @@ struct server {
 	struct wlr_cursor *cursor;
 	struct wlr_xcursor_manager *cursor_mgr;
 	struct wlr_seat *seat;
-	struct theme theme;
+	struct theme theme;  /* Windows XP (Luna) */
+	struct theme theme7; /* Windows 7 (Aero), when it has been ripped */
+	bool have_xp, have7;
+	/* which Windows each part looks like: 0 = XP, 7 = Windows 7 ("style" sets them all;
+	 * the advanced options mix them) */
+	int style, st_frames, st_taskbar, st_start, st_logon, st_sounds, st_cursors, st_icons;
+	bool opt_glass;          /* Aero transparency */
+	uint32_t glass_rgb;      /* window colour */
+	int glass_intensity;     /* 0..100 */
+	struct wlr_buffer *glass_buf; /* the desktop, blurred, at 1/GLASS_DIV of the screen */
+	char cursor_theme[32];
+	bool own_gtk_theme;
 
 	enum grab_mode grab;
 	struct view *grab_view;
@@ -105,6 +117,20 @@ struct server {
 	struct wl_listener new_input, request_cursor, request_set_selection, request_set_primary;
 	struct wl_listener request_activate, request_cursor_shape;
 };
+
+#define GLASS_DIV 4
+/* the theme that draws a part: theme_of(s, s->st_frames) */
+struct theme *theme_of(struct server *s, int style);
+int taskbar_h(struct server *s);
+/* a node showing the blurred desktop under screen rect (x, y, w, h) (created on first use);
+ * hidden when glass is off. Keep it below whatever it backs. */
+void glass_backdrop(struct server *s, struct wlr_scene_buffer **node, struct wlr_scene_tree *parent,
+	int px, int py, int x, int y, int w, int h);
+/* shell.c made a new desktop picture: s->glass_buf changed */
+void server_glass_changed(struct server *s);
+/* draw the glass fill for a w x h panel at screen position (sx, sy): tint, streaks, edges */
+void draw_glass(struct server *s, cairo_t *cr, double x, double y, double w, double h, double r_top,
+	double r_bottom, bool active);
 
 void view_focus(struct view *v);
 void view_set_minimized(struct view *v, bool min);

@@ -34,7 +34,7 @@ void sound_play(struct server *s, const char *name) {
 	if (getenv("EXPEDE_MUTE") || !s->opt_sounds)
 		return;
 	char path[640], cmd[2400];
-	snprintf(path, sizeof(path), "%s/sounds/%s.wav", s->theme.dir, name);
+	snprintf(path, sizeof(path), "%s/sounds/%s.wav", theme_of(s, s->st_sounds)->dir, name);
 	/* whichever player the system has: PipeWire, PulseAudio, then plain ALSA */
 	snprintf(cmd, sizeof(cmd), "pw-play '%s' 2>/dev/null || paplay '%s' 2>/dev/null || aplay -q '%s' 2>/dev/null",
 		path, path, path);

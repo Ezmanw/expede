@@ -15,7 +15,7 @@ sudo apt-get install -y build-essential meson ninja-build pkg-config p7zip-full 
 echo "== Windows XP theme files"
 mkdir -p "$HOME/.local/share/expede" "$HOME/.local/share/fonts"
 if [ -n "$1" ]; then
-	python3 -I tools/xprip.py "$1"
+	for iso in "$@"; do if 7z l "$iso" sources/install.wim 2>/dev/null | grep -q install.wim; then python3 -I tools/w7rip.py "$iso"; else python3 -I tools/xprip.py "$iso"; fi; done
 elif [ -d xp ]; then
 	rm -rf "$HOME/.local/share/expede/xp"
 	cp -r xp "$HOME/.local/share/expede/xp"
