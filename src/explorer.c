@@ -1242,8 +1242,8 @@ static void paint_content(struct ui_win *w, cairo_t *cr) {
 		/* column headers: Luna's list view header bitmap */
 		static const char *cols[] = {"Name", "Size", "Type", "Date Modified"};
 		int cx[] = {0, 290, 370, 518, 666}, hy = c.y;
-		struct image hdr = {.s = theme_png(&ui_theme, "luna/listviewheader.png"), .count = 3, .vertical = true,
-			.m = {3, 3, 3, 3}};
+		struct image hdr = {.s = theme_png(&ui_theme, "luna/listviewheader.png"), .count = 5, .vertical = true,
+			.m = {8, 8, 3, 4}};
 		for (int k = 0; k < 4; k++) {
 			int cw = cx[k + 1] - cx[k];
 			draw_image(cr, &hdr, ui_state(w, ID_COL + k) == 2 ? 2 : ui_state(w, ID_COL + k), ox + cx[k], hy, cw, 22);
@@ -1291,7 +1291,7 @@ static void paint_content(struct ui_win *w, cairo_t *cr) {
 			th = 20;
 		int ty = c.y + (int)((double)ex.scroll / (ex.content_h - c.h) * (c.h - th));
 		struct image thumb = {.s = theme_png(&ui_theme, "luna/scrollthumbvertical.png"), .count = 4, .vertical = true,
-			.m = {3, 3, 3, 3}};
+			.m = {8, 8, 3, 4}};
 		draw_image(cr, &thumb, ex.dragging_thumb ? 2 : ui_state(w, ID_THUMB), sx, ty, SB_W, th);
 		if (thumb.s)
 			cairo_surface_destroy(thumb.s);

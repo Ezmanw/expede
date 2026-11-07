@@ -354,7 +354,7 @@ LOGON_BITMAPS = {
 
 # Luna colour scheme files we need (Blue scheme; Homestead/Metallic can follow).
 LUNA_PREFIX = 'BLUE_'
-LUNA_KEY_OVERRIDES = {'TASKBARTRAY': (255, 0, 0)}
+LUNA_KEY_OVERRIDES = {'TASKBARTRAY': (255, 0, 0), 'LISTVIEWHEADER': (255, 0, 0)}
 
 
 def run7z(*args):
