@@ -7,6 +7,7 @@
  * bottom of the left column: typing filters apps, and All Programs swaps the
  * left column for a scrolling list. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
@@ -97,10 +98,12 @@ struct shell {
 	struct wlr_box vol_box;      /* layout coords */
 	struct icon_set vol_icon, vol_icon_muted, vol_icon_0, vol_icon_1, vol_icon_2, sndvol_icon;
 	struct wlr_scene_buffer *volpop;
-	bool bat_open;
+	bool bat_open, bright_drag, bright_hw;
+	int bright_pct;
 	struct wlr_box bat_icon_box; /* taskbar coords */
 	struct wlr_box bat_box;      /* layout coords */
 	struct wlr_scene_buffer *batpop;
+	struct wlr_scene_rect *bright_veil;
 };
 
 #define VOL_W 72
@@ -111,8 +114,9 @@ struct shell {
 #define W7_VOL_H 228
 #define W7_VOL_TOP 66
 #define W7_VOL_TH 96
-#define BAT_POP_W 200
-#define BAT_POP_H 78
+#define BAT_POP_W 216
+#define BAT_SLIDER_X 36
+#define BAT_SLIDER_W 164
 
 static void show(struct wlr_scene_buffer **node, struct wlr_scene_tree *parent, cairo_surface_t *s, int x, int y) {
 	scene_show(node, parent, s, x, y);
@@ -333,16 +337,20 @@ static void add_icon(struct shell *sh, const char *label, const char *label7, co
 /* first battery under /sys/class/power_supply, like the tray's power meter */
 static void read_battery(struct shell *sh) {
 	sh->bat_pct = -1;
-	for (int i = 0; i < 4; i++) {
-		char p[96];
-		snprintf(p, sizeof(p), "/sys/class/power_supply/BAT%d/capacity", i);
+	DIR *d = opendir("/sys/class/power_supply");
+	struct dirent *e;
+	while (d && (e = readdir(d))) {
+		if (strncmp(e->d_name, "BAT", 3) && strncmp(e->d_name, "CMB", 3))
+			continue;
+		char p[300];
+		snprintf(p, sizeof(p), "/sys/class/power_supply/%s/capacity", e->d_name);
 		FILE *f = fopen(p, "r");
 		if (!f)
 			continue;
 		if (fscanf(f, "%d", &sh->bat_pct) != 1)
 			sh->bat_pct = -1;
 		fclose(f);
-		snprintf(p, sizeof(p), "/sys/class/power_supply/BAT%d/status", i);
+		snprintf(p, sizeof(p), "/sys/class/power_supply/%s/status", e->d_name);
 		char st[32] = "";
 		if ((f = fopen(p, "r"))) {
 			if (!fgets(st, sizeof(st), f))
@@ -350,8 +358,83 @@ static void read_battery(struct shell *sh) {
 			fclose(f);
 		}
 		sh->bat_charging = !strncmp(st, "Charging", 8) || !strncmp(st, "Full", 4);
-		return;
+		break;
 	}
+	if (d)
+		closedir(d);
+}
+
+static void read_brightness(struct shell *sh) {
+	DIR *d = opendir("/sys/class/backlight");
+	struct dirent *e;
+	sh->bright_hw = false;
+	while (d && (e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		char p[300];
+		int cur = 0, max = 0;
+		snprintf(p, sizeof(p), "/sys/class/backlight/%s/brightness", e->d_name);
+		FILE *f = fopen(p, "r");
+		if (f) {
+			if (fscanf(f, "%d", &cur) != 1) cur = 0;
+			fclose(f);
+		}
+		snprintf(p, sizeof(p), "/sys/class/backlight/%s/max_brightness", e->d_name);
+		if ((f = fopen(p, "r"))) {
+			if (fscanf(f, "%d", &max) != 1) max = 0;
+			fclose(f);
+		}
+		if (max > 0) {
+			sh->bright_hw = true;
+			if (!sh->bright_drag)
+				sh->bright_pct = (cur * 100 + max / 2) / max;
+			break;
+		}
+	}
+	if (d)
+		closedir(d);
+	if (sh->bright_pct <= 0)
+		sh->bright_pct = 100;
+}
+
+static void apply_brightness(struct shell *sh, int pct) {
+	if (pct < 10) pct = 10;
+	if (pct > 100) pct = 100;
+	sh->bright_pct = pct;
+	if (sh->bright_hw) {
+		char cmd[64];
+		snprintf(cmd, sizeof(cmd), "brightnessctl -q set %d%%", pct);
+		spawn(cmd);
+	} else {
+		float alpha = (100 - pct) * 0.78f / 90.0f;
+		float col[4] = {0, 0, 0, alpha};
+		if (!sh->bright_veil)
+			sh->bright_veil = wlr_scene_rect_create(sh->server->layer_overlay, sh->w, sh->h, col);
+		else {
+			wlr_scene_rect_set_size(sh->bright_veil, sh->w, sh->h);
+			wlr_scene_rect_set_color(sh->bright_veil, col);
+		}
+		wlr_scene_node_set_enabled(&sh->bright_veil->node, pct < 100);
+	}
+}
+
+static void draw_sun(cairo_t *cr, double x, double y, uint32_t rgb) {
+	static const double rays[8][2] = {
+		{1, 0}, {0.7, 0.7}, {0, 1}, {-0.7, 0.7},
+		{-1, 0}, {-0.7, -0.7}, {0, -1}, {0.7, -0.7},
+	};
+	double cx = x + 8, cy = y + 8;
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, ((rgb >> 16) & 255) / 255.0, ((rgb >> 8) & 255) / 255.0, (rgb & 255) / 255.0);
+	cairo_set_line_width(cr, 1.4);
+	cairo_arc(cr, cx, cy, 3.5, 0, 2 * M_PI);
+	cairo_stroke(cr);
+	for (int i = 0; i < 8; i++) {
+		cairo_move_to(cr, cx + rays[i][0] * 5.2, cy + rays[i][1] * 5.2);
+		cairo_line_to(cr, cx + rays[i][0] * 7.2, cy + rays[i][1] * 7.2);
+	}
+	cairo_stroke(cr);
+	cairo_restore(cr);
 }
 
 /* a 16px battery: outline, fill to the charge (red when low), bolt when plugged in */
@@ -389,6 +472,7 @@ static void draw_battery(cairo_t *cr, struct shell *sh, double x, double y) {
 
 static void tick(struct shell *sh) {
 	read_battery(sh);
+	read_brightness(sh);
 	time_t now = time(NULL);
 	struct tm tm;
 	localtime_r(&now, &tm);
@@ -428,11 +512,12 @@ static void draw_taskbar7(struct shell *sh) {
 	draw_text(cr, "Segoe UI 9", sh->clock, cx + (clock_w - cw) / 2, 4, 0, 0xffffff, 0, 0, 0, false);
 	draw_text(cr, "Segoe UI 9", sh->date, cx + (clock_w - dw) / 2, 20, 0, 0xffffff, 0, 0, 0, false);
 	int tx = cx;
-	if (sh->bat_pct >= 0) {
-		tx -= 24;
-		sh->bat_icon_box = (struct wlr_box){tx, 8, 24, 24};
+	tx -= 24;
+	sh->bat_icon_box = (struct wlr_box){tx, 8, 24, 24};
+	if (sh->bat_pct >= 0)
 		draw_battery(cr, sh, tx + 4, 12);
-	}
+	else
+		draw_sun(cr, tx + 4, 12, 0xffffff);
 	if (sh->vol_ok) {
 		tx -= 26;
 		sh->vol_icon_box = (struct wlr_box){tx, 8, 24, 24};
@@ -489,9 +574,9 @@ static void draw_taskbar(struct shell *sh) {
 	draw_surface(cr, t->start_flag, 7, 5);
 	draw_text(cr, "Franklin Gothic Medium, Italic 14", "start", 35, 2, 0, 0xffffff, 1, 1, 0x454c10, false);
 
-	/* tray: the speaker, then the clock */
+	/* tray: the speaker, brightness/battery, then the clock */
 	int cw = text_width("Tahoma 8", sh->clock);
-	int icons_w = (sh->vol_ok ? 22 : 0) + (sh->bat_pct >= 0 ? 22 : 0);
+	int icons_w = (sh->vol_ok ? 22 : 0) + 22;
 	int trayw = cw + 19 + 14 + icons_w;
 	if (trayw < 62)
 		trayw = 62;
@@ -501,11 +586,12 @@ static void draw_taskbar(struct shell *sh) {
 		sh->vol_icon_box = (struct wlr_box){tx + 17, 5, 20, 20};
 		draw_surface(cr, (sh->vol_muted ? sh->vol_icon_muted : sh->vol_icon).s16, tx + 19, 7);
 	}
-	if (sh->bat_pct >= 0) {
-		int bx = tx + 19 + (sh->vol_ok ? 22 : 0);
-		sh->bat_icon_box = (struct wlr_box){bx - 2, 5, 20, 20};
+	int bx = tx + 19 + (sh->vol_ok ? 22 : 0);
+	sh->bat_icon_box = (struct wlr_box){bx - 2, 5, 20, 20};
+	if (sh->bat_pct >= 0)
 		draw_battery(cr, sh, bx, 6);
-	}
+	else
+		draw_sun(cr, bx, 7, 0xffffff);
 	draw_text(cr, "Tahoma 8", sh->clock, tx + trayw - 12 - cw, 8, 0, 0xffffff, 0, 0, 0, true);
 
 	/* task buttons */
@@ -573,50 +659,92 @@ static void load_tray_icons(struct shell *sh) {
 		sh->sndvol_icon = theme_icon(vt, "cp-sounds");
 }
 
+static int bat_pop_h(struct shell *sh) {
+	return sh->bat_pct >= 0 ? 128 : 90;
+}
+
 static void draw_batpop(struct shell *sh) {
-	if (!sh->bat_open || sh->bat_pct < 0) {
+	if (!sh->bat_open) {
 		if (sh->batpop)
 			wlr_scene_node_set_enabled(&sh->batpop->node, false);
 		return;
 	}
 	bool w7 = bar7(sh);
-	theme_use_fonts(bar_theme(sh));
-	cairo_surface_t *s = canvas_new(BAT_POP_W, BAT_POP_H);
+	struct theme *t = bar_theme(sh);
+	theme_use_fonts(t);
+	int ph = bat_pop_h(sh);
+	cairo_surface_t *s = canvas_new(BAT_POP_W, ph);
 	cairo_t *cr = cairo_create(s);
 	if (w7) {
-		fill(cr, 0, 0, BAT_POP_W, BAT_POP_H, 0x556677);
-		fill(cr, 1, 1, BAT_POP_W - 2, BAT_POP_H - 2, 0xd8e6f6);
-		fill(cr, 4, 4, BAT_POP_W - 8, BAT_POP_H - 30, 0xffffff);
-		fill(cr, 4, BAT_POP_H - 26, BAT_POP_W - 8, 22, 0xf1f5fb);
-		fill(cr, 4, BAT_POP_H - 26, BAT_POP_W - 8, 1, 0xd6e5f5);
+		fill(cr, 0, 0, BAT_POP_W, ph, 0x556677);
+		fill(cr, 1, 1, BAT_POP_W - 2, ph - 2, 0xd8e6f6);
+		fill(cr, 4, 4, BAT_POP_W - 8, ph - 30, 0xffffff);
+		fill(cr, 4, ph - 26, BAT_POP_W - 8, 22, 0xf1f5fb);
+		fill(cr, 4, ph - 26, BAT_POP_W - 8, 1, 0xd6e5f5);
 	} else {
-		fill(cr, 0, 0, BAT_POP_W, BAT_POP_H, 0x716f64);
-		fill(cr, 1, 1, BAT_POP_W - 2, BAT_POP_H - 2, 0xffffff);
-		fill(cr, 2, 2, BAT_POP_W - 3, BAT_POP_H - 3, 0xaca899);
-		fill(cr, 2, 2, BAT_POP_W - 4, BAT_POP_H - 4, 0xece9d8);
+		fill(cr, 0, 0, BAT_POP_W, ph, 0x716f64);
+		fill(cr, 1, 1, BAT_POP_W - 2, ph - 2, 0xffffff);
+		fill(cr, 2, 2, BAT_POP_W - 3, ph - 3, 0xaca899);
+		fill(cr, 2, 2, BAT_POP_W - 4, ph - 4, 0xece9d8);
 	}
-	draw_battery(cr, sh, 14, 14);
-	char line1[64];
-	snprintf(line1, sizeof(line1), "%d%% available", sh->bat_pct);
-	draw_text(cr, "Tahoma Bold 8", line1, 38, 12, BAT_POP_W - 46, 0x000000, 0, 0, 0, true);
-	const char *line2 = sh->bat_charging ? "(plugged in, charging)" : "On battery power";
-	draw_text(cr, "Tahoma 8", line2, 38, 28, BAT_POP_W - 46, 0x5a5a5a, 0, 0, 0, true);
-	draw_text(cr, "Tahoma 8", "More power options", 14, BAT_POP_H - 21, BAT_POP_W - 24, 0x0066cc, 0, 0, 0, true);
+	int sy = 12;
+	if (sh->bat_pct >= 0) {
+		draw_battery(cr, sh, 14, 14);
+		char line1[64];
+		snprintf(line1, sizeof(line1), "%d%% available", sh->bat_pct);
+		draw_text(cr, "Tahoma Bold 8", line1, 38, 12, BAT_POP_W - 46, 0x000000, 0, 0, 0, true);
+		const char *line2 = sh->bat_charging ? "(plugged in, charging)" : "On battery power";
+		draw_text(cr, "Tahoma 8", line2, 38, 28, BAT_POP_W - 46, 0x5a5a5a, 0, 0, 0, true);
+		fill(cr, 12, 48, BAT_POP_W - 24, 1, w7 ? 0xd6e5f5 : 0xaca899);
+		sy = 56;
+	}
+	char bstr[48];
+	snprintf(bstr, sizeof(bstr), "Screen brightness: %d%%", sh->bright_pct);
+	draw_text(cr, "Tahoma 8", bstr, 14, sy, BAT_POP_W - 24, 0x000000, 0, 0, 0, true);
+	int ty = sy + 20;
+	draw_sun(cr, 14, ty - 2, w7 ? 0x1e395b : 0x000000);
+	draw_image(cr, &t->slider_track, 0, BAT_SLIDER_X, ty + 4, BAT_SLIDER_W, 4);
+	int tx = BAT_SLIDER_X + (sh->bright_pct - 10) * (BAT_SLIDER_W - 11) / 90;
+	if (tx < BAT_SLIDER_X) tx = BAT_SLIDER_X;
+	draw_image(cr, &t->slider_thumb_h, sh->bright_drag ? 2 : 0, tx, ty - 4, 11, 21);
+
+	draw_text(cr, "Tahoma 8", "More power options", 14, ph - 21, BAT_POP_W - 24, 0x0066cc, 0, 0, 0, true);
 	cairo_destroy(cr);
 	show(&sh->batpop, sh->server->layer_menu, s, sh->bat_box.x, sh->bat_box.y);
 	wlr_scene_node_set_enabled(&sh->batpop->node, true);
 }
 
 static void bat_set_open(struct shell *sh, bool open) {
-	sh->bat_open = open && sh->bat_pct >= 0;
+	sh->bat_open = open;
+	sh->bright_drag = false;
 	if (sh->bat_open) {
 		read_battery(sh);
+		read_brightness(sh);
+		int ph = bat_pop_h(sh);
 		int x = sh->bat_icon_box.x + sh->bat_icon_box.width / 2 - BAT_POP_W / 2;
 		if (x + BAT_POP_W > sh->w - 4)
 			x = sh->w - BAT_POP_W - 4;
-		sh->bat_box = (struct wlr_box){x, sh->h - bar_h(sh) - BAT_POP_H - 2, BAT_POP_W, BAT_POP_H};
+		sh->bat_box = (struct wlr_box){x, sh->h - bar_h(sh) - ph - 2, BAT_POP_W, ph};
 	}
 	draw_batpop(sh);
+}
+
+static void bright_drag_to(struct shell *sh, double x) {
+	int pct = 10 + (int)((x - sh->bat_box.x - BAT_SLIDER_X) * 90 / (BAT_SLIDER_W - 11) + 0.5);
+	if (pct < 10) pct = 10;
+	if (pct > 100) pct = 100;
+	if (pct != sh->bright_pct)
+		apply_brightness(sh, pct);
+	draw_batpop(sh);
+}
+
+void shell_brightness_key(struct shell *sh, int step) {
+	if (!sh)
+		return;
+	read_brightness(sh);
+	apply_brightness(sh, sh->bright_pct + step);
+	if (sh->bat_open)
+		draw_batpop(sh);
 }
 
 static void draw_volpop(struct shell *sh) {
@@ -1327,6 +1455,10 @@ bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 		vol_drag_to(sh, y);
 		return true;
 	}
+	if (sh->bright_drag) {
+		bright_drag_to(sh, x);
+		return true;
+	}
 	if (sh->vol_open && in_box(&sh->vol_box, x, y))
 		return true;
 	if (sh->bat_open && in_box(&sh->bat_box, x, y))
@@ -1416,19 +1548,33 @@ static void activate_item(struct shell *sh, struct menu_item *m) {
 bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, bool over_view) {
 	struct wlr_box mb = menu_box(sh);
 	bool on_bar = y >= sh->h - bar_h(sh);
-	if (sh->bat_open) {
+	if (sh->bat_open || sh->bright_drag) {
+		if (sh->bright_drag && !pressed) {
+			sh->bright_drag = false;
+			draw_batpop(sh);
+			return true;
+		}
 		if (in_box(&sh->bat_box, x, y)) {
-			if (pressed && y - sh->bat_box.y >= BAT_POP_H - 26) {
-				bat_set_open(sh, false);
-				spawn("expede-settings power");
+			if (pressed) {
+				int ph = bat_pop_h(sh);
+				int sy = sh->bat_pct >= 0 ? 56 : 12;
+				double lx = x - sh->bat_box.x, ly = y - sh->bat_box.y;
+				if (ly >= ph - 26) {
+					bat_set_open(sh, false);
+					spawn("expede-settings power");
+				} else if (lx >= BAT_SLIDER_X - 6 && lx <= BAT_SLIDER_X + BAT_SLIDER_W + 6 &&
+						ly >= sy + 12 && ly <= sy + 42) {
+					sh->bright_drag = true;
+					bright_drag_to(sh, x);
+				}
 			}
 			return true;
 		}
 		if (pressed)
 			bat_set_open(sh, false);
-		if (on_bar && sh->bat_pct >= 0 && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh))))
+		if (on_bar && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh))))
 			return true;
-	} else if (pressed && on_bar && sh->bat_pct >= 0 && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh)))) {
+	} else if (pressed && on_bar && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh)))) {
 		if (sh->start_open)
 			shell_toggle_start(sh);
 		if (sh->vol_open)
@@ -1602,6 +1748,17 @@ bool shell_key(struct shell *sh, uint32_t sym, const char *utf8) {
 }
 
 bool shell_axis(struct shell *sh, double x, double y, double delta) {
+	bool on_bar = y >= sh->h - bar_h(sh);
+	if ((sh->bat_open && in_box(&sh->bat_box, x, y)) ||
+			(on_bar && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh))))) {
+		shell_brightness_key(sh, delta < 0 ? 5 : -5);
+		return true;
+	}
+	if ((sh->vol_open && in_box(&sh->vol_box, x, y)) ||
+			(on_bar && sh->vol_ok && in_box(&sh->vol_icon_box, x, y - (sh->h - bar_h(sh))))) {
+		shell_volume_key(sh, delta < 0 ? 5 : -5, false);
+		return true;
+	}
 	if (!sh->start_open)
 		return false;
 	struct wlr_box mb = menu_box(sh);
@@ -1645,6 +1802,8 @@ void shell_reconfigure(struct shell *sh) {
 
 void shell_layout(struct shell *sh) {
 	server_screen(sh->server, &sh->w, &sh->h);
+	if (sh->bright_veil)
+		wlr_scene_rect_set_size(sh->bright_veil, sh->w, sh->h);
 	draw_desktop(sh);
 	draw_taskbar(sh);
 	draw_menu(sh);

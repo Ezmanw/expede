@@ -177,8 +177,9 @@ bool shell_start_open(struct shell *sh);
 bool shell_key(struct shell *sh, uint32_t sym, const char *utf8);
 bool shell_axis(struct shell *sh, double x, double y, double delta);
 void shell_reconfigure(struct shell *sh); /* options changed */
-/* volume keys: step in percent, or toggle mute */
+/* volume and brightness keys: step in percent, or toggle mute */
 void shell_volume_key(struct shell *sh, int step, bool toggle_mute);
+void shell_brightness_key(struct shell *sh, int step);
 
 /* ---- session (session.c): welcome screen, log off, Turn Off dialog, sounds ---- */
 

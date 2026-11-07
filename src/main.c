@@ -1776,9 +1776,8 @@ static bool handle_binding(struct server *s, xkb_keysym_t sym, uint32_t mods) {
 	case XKB_KEY_XF86AudioRaiseVolume: shell_volume_key(s->shell, 5, false); return true;
 	case XKB_KEY_XF86AudioLowerVolume: shell_volume_key(s->shell, -5, false); return true;
 	case XKB_KEY_XF86AudioMute: shell_volume_key(s->shell, 0, true); return true;
-	/* laptop brightness keys; brightnessctl goes through logind, so no root needed */
-	case XKB_KEY_XF86MonBrightnessUp: spawn("brightnessctl -q set 5%+"); return true;
-	case XKB_KEY_XF86MonBrightnessDown: spawn("brightnessctl -q set 5%-"); return true;
+	case XKB_KEY_XF86MonBrightnessUp: shell_brightness_key(s->shell, 5); return true;
+	case XKB_KEY_XF86MonBrightnessDown: shell_brightness_key(s->shell, -5); return true;
 	}
 	if (sym == XKB_KEY_Escape && shell_start_open(s->shell)) {
 		shell_toggle_start(s->shell);
