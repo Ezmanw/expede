@@ -3,6 +3,8 @@
  * and the system sounds that go with them. Layout and colours follow the
  * DirectUI markup inside logonui.exe. */
 #define _GNU_SOURCE
+#include <dirent.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +13,7 @@
 #include "expede.h"
 
 enum state { ST_WELCOME, ST_LOGGING_ON, ST_DESKTOP, ST_LOGGING_OFF, ST_SHUTTING_DOWN, ST_TURNOFF };
-enum hot { HOT_NONE, HOT_ACCOUNT, HOT_TURNOFF, HOT_STANDBY, HOT_OFF, HOT_RESTART, HOT_CANCEL };
+enum hot { HOT_NONE, HOT_ACCOUNT, HOT_TURNOFF, HOT_STANDBY, HOT_OFF, HOT_RESTART, HOT_CANCEL, HOT_W7_ARROW, HOT_W7_MENU_RESTART, HOT_W7_MENU_SLEEP, HOT_W7_MENU_LOGOFF };
 enum after { AFTER_NONE, AFTER_POWEROFF, AFTER_REBOOT };
 
 struct session {
@@ -20,12 +22,16 @@ struct session {
 	enum hot hot, pressed;
 	enum after after;
 	bool startup_played;
+	bool w7_power_menu;
 	enum state dialog_from; /* where Cancel on the Turn Off dialog returns to */
-	int w, h;
+	int w, h, w7_bg_w, w7_bg_h;
 	struct wlr_scene_buffer *node;
 	struct wl_event_source *timer;
 	cairo_surface_t *glow, *logo, *frame, *frame_hot, *account_sel, *div_v, *div_top, *div_bottom;
 	cairo_surface_t *turnoff, *turnoff_hot, *dialog, *dialog_flag, *dialog_buttons;
+	/* Windows 7 logon assets */
+	cairo_surface_t *w7_bg, *w7_branding[2], *w7_tile_frame, *w7_spinner, *w7_ease;
+	cairo_surface_t *w7_go[3], *w7_shutdown[3], *w7_shutdown_arrow[3], *w7_button[3];
 };
 
 /* ---- sounds ---- */
@@ -43,17 +49,37 @@ void sound_play(struct server *s, const char *name) {
 
 /* ---- geometry (1024x768 matches XP's own proportions) ---- */
 
+static bool logon7(struct session *se) {
+	return theme_of(se->server, se->server->st_logon)->version == 7;
+}
+
 static int top_h(struct session *se) { return se->h * 78 / 768; }
 static int bottom_h(struct session *se) { return se->h * 96 / 768; }
 static int content_mid(struct session *se) { return (top_h(se) + se->h - bottom_h(se)) / 2; }
 
 static struct wlr_box account_box(struct session *se) {
+	if (logon7(se))
+		return (struct wlr_box){(se->w - 220) / 2, se->h / 2 - 150, 220, 250};
 	return (struct wlr_box){se->w / 2 + 26, content_mid(se) - 36, 308, 72};
 }
 
+static struct wlr_box w7_go_box(struct session *se) {
+	return (struct wlr_box){(se->w - 38) / 2, se->h / 2 + 64, 38, 38};
+}
+
 static struct wlr_box turnoff_box(struct session *se) {
+	if (logon7(se))
+		return (struct wlr_box){se->w - 32 - 21 - 38, se->h - 32 - 28, 38, 28};
 	int y = se->h - bottom_h(se) + 22;
 	return (struct wlr_box){25, y, 26 + 8 + text_width("Tahoma 14", "Turn off computer"), 26};
+}
+
+static struct wlr_box w7_arrow_box(struct session *se) {
+	return (struct wlr_box){se->w - 32 - 21, se->h - 32 - 28, 21, 28};
+}
+
+static struct wlr_box w7_power_menu_box(struct session *se) {
+	return (struct wlr_box){se->w - 32 - 120, se->h - 32 - 28 - 80, 120, 76};
 }
 
 static struct wlr_box dialog_box(struct session *se) {
@@ -135,7 +161,132 @@ static void draw_account(struct session *se, cairo_t *cr, bool selected, const c
 		draw_text(cr, "Tahoma Bold 8", status, fx + 58 + 7, fy + 34, 220, 0xeff7ff, 0, 0, 0, false);
 }
 
+/* pick logon/background-WxH.jpg with the closest aspect ratio to the screen */
+static void load_w7_bg(struct session *se) {
+	if (se->w7_bg && se->w7_bg_w == se->w && se->w7_bg_h == se->h)
+		return;
+	struct theme *t7 = &se->server->theme7;
+	if (!t7->dir[0] || se->w <= 0 || se->h <= 0)
+		return;
+	char dir[600], best[768] = "";
+	snprintf(dir, sizeof(dir), "%s/logon", t7->dir);
+	DIR *d = opendir(dir);
+	if (!d)
+		return;
+	double want = (double)se->w / se->h, best_diff = 1e9;
+	int best_area = 0;
+	struct dirent *de;
+	while ((de = readdir(d))) {
+		int bw = 0, bh = 0;
+		if (sscanf(de->d_name, "background-%dx%d.jpg", &bw, &bh) == 2 && bw > 0 && bh > 0) {
+			double diff = fabs((double)bw / bh - want);
+			int area = abs(bw * bh - se->w * se->h);
+			if (diff < best_diff - 0.01 || (fabs(diff - best_diff) <= 0.01 && area < best_area)) {
+				best_diff = diff;
+				best_area = area;
+				snprintf(best, sizeof(best), "%s/%s", dir, de->d_name);
+			}
+		}
+	}
+	closedir(d);
+	if (best[0]) {
+		if (se->w7_bg)
+			cairo_surface_destroy(se->w7_bg);
+		se->w7_bg = theme_load_image(best);
+		se->w7_bg_w = se->w;
+		se->w7_bg_h = se->h;
+	}
+}
+
+static void draw_welcome7(struct session *se, cairo_t *cr) {
+	int w = se->w, h = se->h;
+	struct theme *t7 = &se->server->theme7;
+	theme_use_fonts(t7);
+	load_w7_bg(se);
+	if (se->w7_bg) {
+		stretch(cr, se->w7_bg, 0, 0, w, h);
+	} else {
+		rgb(cr, 0x0b4177);
+		cairo_rectangle(cr, 0, 0, w, h);
+		cairo_fill(cr);
+	}
+	if (se->w7_branding[0])
+		draw_frame_dpi(cr, se->w7_branding[0], se->w7_branding[1], 1, 0, (w - 350) / 2, h - 74);
+
+	if (se->state != ST_WELCOME) {
+		const char *msg = se->state == ST_LOGGING_ON ? "Welcome" :
+			se->state == ST_LOGGING_OFF ? "Logging off..." : "Shutting down...";
+		int tw = text_width("Segoe UI 18", msg);
+		int sx = (w - (30 + 10 + tw)) / 2, sy = h / 2 - 20;
+		if (se->w7_spinner) {
+			struct image sp = {.s = se->w7_spinner, .count = 18, .vertical = false};
+			draw_image(cr, &sp, 3, sx, sy + 2, 30, 30);
+		}
+		draw_text(cr, "Segoe UI 18", msg, sx + 40, sy + 1, 0, 0xffffff, 1, 2, 0x000000, false);
+		return;
+	}
+
+	/* centered user tile (190x190 frame around 126x126 account picture) */
+	int fx = (w - 190) / 2, fy = h / 2 - 165;
+	cairo_surface_t *upic = t7->user_pic ? t7->user_pic : se->server->theme.user_pic;
+	if (upic)
+		stretch(cr, upic, fx + 32, fy + 32, 126, 126);
+	draw_surface(cr, se->w7_tile_frame, fx, fy);
+
+	const char *user = getenv("USER") ? getenv("USER") : "User";
+	int uw = text_width("Segoe UI 18", user);
+	draw_text(cr, "Segoe UI 18", user, (w - uw) / 2, fy + 188, 0, 0xffffff, 1, 2, 0x000000, false);
+
+	/* Go arrow button beneath the user name */
+	struct wlr_box gb = w7_go_box(se);
+	int gf = se->pressed == HOT_ACCOUNT ? 2 : se->hot == HOT_ACCOUNT ? 1 : 0;
+	draw_surface(cr, se->w7_go[gf], gb.x, gb.y);
+
+	/* bottom-left Ease of Access button */
+	if (se->w7_button[0]) {
+		draw_surface(cr, se->w7_button[0], 32, h - 32 - 28);
+		if (se->w7_ease)
+			draw_surface(cr, se->w7_ease, 32 + (35 - 24) / 2, h - 32 - 28 + 2);
+	}
+
+	/* bottom-right red Shut down button + arrow */
+	struct wlr_box tb = turnoff_box(se), ab = w7_arrow_box(se);
+	int sf = se->pressed == HOT_TURNOFF ? 2 : se->hot == HOT_TURNOFF ? 1 : 0;
+	int af = (se->pressed == HOT_W7_ARROW || se->w7_power_menu) ? 2 : se->hot == HOT_W7_ARROW ? 1 : 0;
+	draw_surface(cr, se->w7_shutdown[sf], tb.x, tb.y);
+	draw_surface(cr, se->w7_shutdown_arrow[af], ab.x, ab.y);
+
+	if (se->w7_power_menu) {
+		struct wlr_box mb = w7_power_menu_box(se);
+		mb.y += 24;
+		mb.height -= 24;
+		rgb(cr, 0x646464);
+		cairo_rectangle(cr, mb.x, mb.y, mb.width, mb.height);
+		cairo_fill(cr);
+		rgb(cr, 0xf0f0f0);
+		cairo_rectangle(cr, mb.x + 1, mb.y + 1, mb.width - 2, mb.height - 2);
+		cairo_fill(cr);
+		static const char *labels[2] = {"Restart", "Sleep"};
+		static const enum hot hots[2] = {HOT_W7_MENU_RESTART, HOT_W7_MENU_SLEEP};
+		for (int i = 0; i < 2; i++) {
+			int ry = mb.y + 2 + i * 24;
+			if (se->hot == hots[i]) {
+				rgb(cr, 0x3399ff);
+				cairo_rectangle(cr, mb.x + 2, ry, mb.width - 4, 24);
+				cairo_fill(cr);
+			}
+			draw_text(cr, "Segoe UI 9", labels[i], mb.x + 12, ry + 4, 0,
+				se->hot == hots[i] ? 0xffffff : 0x000000, 0, 0, 0, false);
+		}
+	}
+}
+
 static void draw_welcome(struct session *se, cairo_t *cr) {
+	if (logon7(se)) {
+		draw_welcome7(se, cr);
+		return;
+	}
+	theme_use_fonts(&se->server->theme);
 	int w = se->w, h = se->h, mid = content_mid(se);
 	draw_frame_screen(se, cr);
 	int ch = h - top_h(se) - bottom_h(se);
@@ -222,6 +373,7 @@ static void redraw(struct session *se) {
 static void set_state(struct session *se, enum state st, int timeout_ms) {
 	se->state = st;
 	se->hot = se->pressed = HOT_NONE;
+	se->w7_power_menu = false;
 	wl_event_source_timer_update(se->timer, timeout_ms);
 	redraw(se);
 }
@@ -293,6 +445,17 @@ bool session_active(struct session *se) {
 
 static enum hot hot_at(struct session *se, double x, double y) {
 	if (se->state == ST_WELCOME) {
+		if (logon7(se) && se->w7_power_menu) {
+			struct wlr_box mb = w7_power_menu_box(se);
+			mb.y += 24;
+			mb.height -= 24;
+			if (in_box(mb, x, y)) {
+				int idx = (int)(y - (mb.y + 2)) / 24;
+				return idx == 0 ? HOT_W7_MENU_RESTART : HOT_W7_MENU_SLEEP;
+			}
+		}
+		if (logon7(se) && in_box(w7_arrow_box(se), x, y))
+			return HOT_W7_ARROW;
 		if (in_box(account_box(se), x, y))
 			return HOT_ACCOUNT;
 		if (in_box(turnoff_box(se), x, y))
@@ -323,6 +486,8 @@ void session_motion(struct session *se, double x, double y) {
 void session_button(struct session *se, double x, double y, bool pressed) {
 	enum hot h = hot_at(se, x, y);
 	if (pressed) {
+		if (se->w7_power_menu && h != HOT_W7_ARROW && h != HOT_W7_MENU_RESTART && h != HOT_W7_MENU_SLEEP)
+			se->w7_power_menu = false;
 		se->pressed = h;
 		redraw(se);
 		return;
@@ -338,7 +503,24 @@ void session_button(struct session *se, double x, double y, bool pressed) {
 		set_state(se, ST_LOGGING_ON, 1800);
 		break;
 	case HOT_TURNOFF:
-		session_turnoff_dialog(se);
+		if (logon7(se))
+			shut_down(se, AFTER_POWEROFF);
+		else
+			session_turnoff_dialog(se);
+		break;
+	case HOT_W7_ARROW:
+		se->w7_power_menu = !se->w7_power_menu;
+		redraw(se);
+		break;
+	case HOT_W7_MENU_RESTART:
+		se->w7_power_menu = false;
+		shut_down(se, AFTER_REBOOT);
+		break;
+	case HOT_W7_MENU_SLEEP:
+		se->w7_power_menu = false;
+		redraw(se);
+		if (!getenv("EXPEDE_NO_POWEROFF"))
+			spawn("systemctl suspend");
 		break;
 	case HOT_OFF:
 		shut_down(se, AFTER_POWEROFF);
@@ -362,7 +544,10 @@ void session_button(struct session *se, double x, double y, bool pressed) {
 void session_key(struct session *se, uint32_t sym) {
 	if (se->state == ST_TURNOFF && sym == XKB_KEY_Escape)
 		dialog_cancel(se);
-	else if (se->state == ST_WELCOME && sym == XKB_KEY_Return)
+	else if (se->state == ST_WELCOME && se->w7_power_menu && sym == XKB_KEY_Escape) {
+		se->w7_power_menu = false;
+		redraw(se);
+	} else if (se->state == ST_WELCOME && sym == XKB_KEY_Return)
 		set_state(se, ST_LOGGING_ON, 1800);
 }
 
@@ -390,6 +575,26 @@ struct session *session_create(struct server *s, bool autologin) {
 	se->dialog = theme_png(t, "logon/dialog.png");
 	se->dialog_flag = theme_png(t, "logon/dialog-flag.png");
 	se->dialog_buttons = theme_png(t, "logon/dialog-buttons.png");
+	if (s->have7) {
+		struct theme *t7 = &s->theme7;
+		se->w7_branding[0] = theme_png(t7, "logon/branding.png");
+		se->w7_branding[1] = theme_png(t7, "logon/branding-120.png");
+		se->w7_tile_frame = theme_png(t7, "logon/tile-frame.png");
+		se->w7_spinner = theme_png(t7, "logon/spinner.png");
+		se->w7_ease = theme_png(t7, "logon/ease-of-access.png");
+		se->w7_go[0] = theme_png(t7, "logon/go.png");
+		se->w7_go[1] = theme_png(t7, "logon/go-hot.png");
+		se->w7_go[2] = theme_png(t7, "logon/go-pressed.png");
+		se->w7_shutdown[0] = theme_png(t7, "logon/shutdown.png");
+		se->w7_shutdown[1] = theme_png(t7, "logon/shutdown-hot.png");
+		se->w7_shutdown[2] = theme_png(t7, "logon/shutdown-pressed.png");
+		se->w7_shutdown_arrow[0] = theme_png(t7, "logon/shutdown-arrow.png");
+		se->w7_shutdown_arrow[1] = theme_png(t7, "logon/shutdown-arrow-hot.png");
+		se->w7_shutdown_arrow[2] = theme_png(t7, "logon/shutdown-arrow-pressed.png");
+		se->w7_button[0] = theme_png(t7, "logon/button.png");
+		se->w7_button[1] = theme_png(t7, "logon/button-hot.png");
+		se->w7_button[2] = theme_png(t7, "logon/button-pressed.png");
+	}
 
 	se->timer = wl_event_loop_add_timer(wl_display_get_event_loop(s->display), on_timer, se);
 	server_screen(s, &se->w, &se->h);

@@ -489,8 +489,8 @@ AUTHUI_BITMAPS = {
     12293: 'shutdown-arrow-hot', 12295: 'shutdown-arrow-pressed', 12213: 'ease-of-access',
     12259: 'button', 12260: 'button-hot', 12261: 'button-pressed',
 }
-# imageres.dll logon backgrounds, one per aspect ratio (IMAGE 5031-5038)
-LOGON_BACKGROUNDS = range(5031, 5057)
+# imageres.dll logon backgrounds, one per aspect ratio (IMAGE 5031-5043)
+LOGON_BACKGROUNDS = range(5031, 5044)
 
 
 def find(root, rel):
