@@ -53,6 +53,18 @@ executable('expede-settings',
 	],
 	install: true)
 
+executable('expede-explorer',
+	'src/explorer.c', 'src/ui.c', 'src/theme.c', client_protos,
+	c_args: ['-DEXPEDE_CLIENT'],
+	dependencies: [
+		dependency('wayland-client'),
+		dependency('xkbcommon'),
+		dependency('cairo'),
+		dependency('pangocairo'),
+		dependency('gdk-pixbuf-2.0'),
+	],
+	install: true)
+
 install_data('data/expede.desktop', install_dir: get_option('datadir') / 'wayland-sessions')
 install_data('data/expede-settings.desktop', install_dir: get_option('datadir') / 'applications')
 install_data('tools/xprip.py', install_dir: get_option('bindir'), rename: 'expede-xprip', install_mode: 'rwxr-xr-x')

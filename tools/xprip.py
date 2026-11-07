@@ -307,6 +307,18 @@ ICONS += [
     ('shell32.dll', 180, 'cp-display'), ('shell32.dll', 273, 'cp-network'),
 ]
 
+# Explorer: file types and drives
+ICONS += [
+    ('shell32.dll', 5, 'folder-open'), ('shell32.dll', 152, 'file-text'), ('shell32.dll', 226, 'file-image'),
+    ('shell32.dll', 225, 'file-audio'), ('shell32.dll', 224, 'file-video'), ('shell32.dll', 3, 'file-program'),
+    ('shell32.dll', 151, 'file-config'), ('shell32.dll', 155, 'file-font'), ('shell32.dll', 223, 'file-document'),
+    ('shell32.dll', 9, 'drive-disk'), ('shell32.dll', 7, 'drive-removable'), ('shell32.dll', 12, 'drive-cd'),
+    ('shell32.dll', 10, 'drive-network'), ('shell32.dll', 35, 'desktop'), ('shell32.dll', 22, 'properties'),
+]
+
+# Explorer's toolbar: 47 icons of 24px with alpha, normal and hot
+SHELL32_BITMAPS = {214: 'toolbar', 215: 'toolbar-hot'}
+
 # XP's wallpapers: file stem on the ISO -> the name Display Properties shows
 WALLPAPERS = {
     'ASCENT': 'Ascent', 'AUTUMN': 'Autumn', 'AZUL': 'Azul', 'BLISS': 'Bliss', 'CRYSTAL': 'Crystal',
@@ -422,6 +434,10 @@ def main():
             src = os.path.join(eres, '.rsrc', 'BITMAP', f'{bid}.bmp')
             bmp_to_png(src, os.path.join(out, 'icons', name + '.png'), key=None)
         rip_cursors(os.path.join(raw, 'user32.dll'), out, tmp)
+        sres = os.path.join(tmp, 'bmp-shell32')
+        run7z('x', '-tPE', '-y', '-o' + sres, os.path.join(raw, 'shell32.dll'), '.rsrc/BITMAP/*')
+        for bid, name in SHELL32_BITMAPS.items():
+            bmp_to_png(os.path.join(sres, '.rsrc', 'BITMAP', f'{bid}.bmp'), os.path.join(out, 'icons', name + '.png'), key=None)
 
         # wallpapers and account pictures: one 7z pass for all of them
         os.makedirs(os.path.join(out, 'wallpapers'), exist_ok=True)

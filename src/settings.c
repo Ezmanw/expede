@@ -69,7 +69,6 @@ static void config_load(void) {
 				n--;
 			snprintf(val, sizeof(val), "%.*s", (int)n, v);
 			if (!strcmp(key, "snap")) cfg.snap = truthy(val);
-			else if (!strcmp(key, "start_menu")) cfg.modern = !strcasecmp(val, "modern");
 			else if (!strcmp(key, "tap_to_click")) cfg.tap = truthy(val);
 			else if (!strcmp(key, "natural_scroll")) cfg.natural = truthy(val);
 			else if (!strcmp(key, "sounds")) cfg.sounds = truthy(val);
@@ -100,7 +99,6 @@ static void config_save(void) {
 	}
 	fprintf(f, "# Expede settings (written by the Control Panel)\n");
 	fprintf(f, "snap = %s\n", cfg.snap ? "true" : "false");
-	fprintf(f, "start_menu = %s\n", cfg.modern ? "modern" : "classic");
 	fprintf(f, "tap_to_click = %s\n", cfg.tap ? "true" : "false");
 	fprintf(f, "natural_scroll = %s\n", cfg.natural ? "true" : "false");
 	fprintf(f, "pointer_speed = %d\n", cfg.speed);
@@ -536,11 +534,9 @@ static void paint_taskbar(struct win *w, cairo_t *cr) {
 		check(w, cr, ID_SNAP, 28, 64, cfg.snap, false, "Snap windows to the edges of the screen");
 		hint(cr, 47, 86, "Drag a window to the top to maximise it, or to a side\nto fill half the screen. Not part of Windows XP.");
 	} else {
-		group(cr, 16, 40, SHEET_W - 32, 128, "Start menu style");
-		check(w, cr, ID_CLASSIC, 28, 64, !cfg.modern, true, "Start menu (Windows XP)");
+		group(cr, 16, 40, SHEET_W - 32, 84, "Start menu style");
+		check(w, cr, ID_CLASSIC, 28, 64, true, true, "Start menu (Windows XP)");
 		hint(cr, 47, 84, "All Programs opens XP's cascading list of every app.");
-		check(w, cr, ID_MODERN, 28, 110, cfg.modern, true, "Modern: type to search, app list built in");
-		hint(cr, 47, 130, "Start typing as soon as the Start menu opens.");
 	}
 }
 
@@ -699,8 +695,6 @@ static void activate(struct win *w, int id) {
 	case ID_TAB0: w->tab = 0; w->scroll = 0; break;
 	case ID_TAB1: w->tab = 1; w->scroll = 0; break;
 	case ID_SNAP: cfg.snap = !cfg.snap; break;
-	case ID_CLASSIC: cfg.modern = false; break;
-	case ID_MODERN: cfg.modern = true; break;
 	case ID_TAP: cfg.tap = !cfg.tap; break;
 	case ID_NATURAL: cfg.natural = !cfg.natural; break;
 	case ID_SCHEME_DEFAULT: cfg.sounds = true; break;

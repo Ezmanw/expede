@@ -37,6 +37,20 @@ the ripper at your ISO, and it writes everything to your home folder.
 - **Log Off, and the Turn Off Computer dialog:** Stand By, Turn Off and Restart.
 - **System sounds:** startup, log on, log off, shutdown, minimise, restore, and the "ding" when you set the volume.
 
+### Explorer
+Expede's own file manager, drawn with the same theme bitmaps:
+
+- **Navigation:**
+  - XP's toolbar: Back, Forward, Up, Search, Folders and Views.
+  - An address bar you can type into.
+  - The blue task pane: File and Folder Tasks, Other Places, and a Details box that shows what's selected.
+  - Or a **Folders** tree in place of the task pane.
+- **Views:** Tiles, Icons, List, and Details with sortable columns.
+- **Working with files:** XP right-click menus, cut / copy / paste (with Explorer's "Copy of" naming), rename in place, New Folder, and Properties.
+- **Recycle Bin:** Restore and Empty. It uses the standard Linux trash, so other file managers see the same items.
+- **My Computer:** your drives with their free space, and **Search Companion** for finding files.
+- **Shortcuts:** F2, Delete (Shift+Delete deletes permanently), Ctrl+A/C/X/V, Backspace, Alt+arrows, Ctrl+L, Ctrl+Shift+N and type-to-select.
+
 ### The Control Panel
 XP's category view, or classic view if you prefer. Each applet is an XP property sheet with tabs and OK / Cancel / Apply, and changes apply instantly with no logging out:
 
@@ -67,7 +81,7 @@ cd expede
 ```
 
 That installs the build tools and a few apps (foot as Command Prompt,
-FeatherPad as Notepad, PCManFM-Qt as Explorer), rips your ISO into
+FeatherPad as Notepad), rips your ISO into
 `~/.local/share/expede/xp`, builds Expede and installs it.
 
 Then log out, choose **Expede** from your login screen's session menu, and log in.
@@ -120,6 +134,8 @@ src/theme.c     the Luna theme engine: msstyles ini, nine-slice drawing, text
 src/shell.c     desktop, taskbar, Start menu, volume pop-up
 src/session.c   Welcome screen, log off, Turn Off dialog, sounds
 src/settings.c  the Control Panel (a separate Wayland program)
+src/explorer.c  Explorer
+src/ui.c        the toolkit Explorer is built on: windows, widgets, keyboard
 src/apps.c      installed apps from .desktop files
 src/volume.c    wpctl / pactl / amixer
 tools/xprip.py  the ripper
@@ -132,7 +148,6 @@ vm/             a QEMU test VM that boots straight into Expede
 
 - **Windows 7**, with the Frutiger Aero glass effect as a toggle and an option to mix XP and 7 parts
 - Apps' own buttons, scrollbars and checkboxes drawn with the Windows bitmaps (GTK and Qt)
-- An Explorer-style file manager
 - More Control Panel: network, Bluetooth, displays, power, default apps
 
 ## License

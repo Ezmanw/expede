@@ -986,24 +986,24 @@ struct shell *shell_create(struct server *s) {
 	if (sh->vol_ok)
 		vol_refresh(sh);
 
-	add_icon(sh, "My Documents", "my-documents", "pcmanfm-qt ~");
-	add_icon(sh, "My Computer", "computer", "pcmanfm-qt /");
+	add_icon(sh, "My Documents", "my-documents", "expede-explorer ~");
+	add_icon(sh, "My Computer", "computer", "expede-explorer computer:");
 	add_icon(sh, "My Network Places", "network", "pcmanfm-qt network:///");
-	add_icon(sh, "Recycle Bin", "recycle-empty", "pcmanfm-qt trash:///");
+	add_icon(sh, "Recycle Bin", "recycle-empty", "expede-explorer trash:");
 
 	add_item(sh, ITEM_PINNED, "Command Prompt", "cmd", "foot");
-	add_item(sh, ITEM_PINNED, "Windows Explorer", "explorer", "pcmanfm-qt ~");
+	add_item(sh, ITEM_PINNED, "Windows Explorer", "explorer", "expede-explorer ~");
 	add_item(sh, ITEM_SEP_LEFT, NULL, NULL, NULL);
 	add_item(sh, ITEM_MFU, "Notepad", "notepad", "featherpad");
 	add_item(sh, ITEM_ALL_PROGRAMS, "All Programs", NULL, NULL);
-	add_item(sh, ITEM_PLACE_BOLD, "My Documents", "my-documents", "pcmanfm-qt ~");
-	add_item(sh, ITEM_PLACE_BOLD, "My Pictures", "my-pictures", "pcmanfm-qt ~/Pictures");
-	add_item(sh, ITEM_PLACE_BOLD, "My Music", "my-music", "pcmanfm-qt ~/Music");
-	add_item(sh, ITEM_PLACE_BOLD, "My Computer", "computer", "pcmanfm-qt /");
+	add_item(sh, ITEM_PLACE_BOLD, "My Documents", "my-documents", "expede-explorer ~");
+	add_item(sh, ITEM_PLACE_BOLD, "My Pictures", "my-pictures", "expede-explorer ~/Pictures");
+	add_item(sh, ITEM_PLACE_BOLD, "My Music", "my-music", "expede-explorer ~/Music");
+	add_item(sh, ITEM_PLACE_BOLD, "My Computer", "computer", "expede-explorer computer:");
 	add_item(sh, ITEM_SEP_RIGHT, NULL, NULL, NULL);
 	add_item(sh, ITEM_PLACE, "Control Panel", "control-panel", "expede-settings");
 	add_item(sh, ITEM_PLACE, "Help and Support", "help", NULL);
-	add_item(sh, ITEM_PLACE, "Search", "search", "pcmanfm-qt ~");
+	add_item(sh, ITEM_PLACE, "Search", "search", "expede-explorer ~");
 	add_item(sh, ITEM_PLACE, "Run...", "run", "foot");
 	add_item(sh, ITEM_LOGOFF, "Log Off", NULL, NULL);
 	add_item(sh, ITEM_TURNOFF, "Turn Off Computer", NULL, NULL);

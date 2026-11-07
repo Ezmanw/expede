@@ -79,7 +79,7 @@ static struct icon_set icon_for_app(struct theme *t, const char *app_id) {
 		return theme_icon(t, "notepad");
 	if (app_id && strstr(app_id, "expede-settings"))
 		return theme_icon(t, "control-panel");
-	if (app_id && strstr(app_id, "pcmanfm"))
+	if (app_id && (strstr(app_id, "pcmanfm") || strstr(app_id, "expede-explorer")))
 		return theme_icon(t, "explorer");
 	return theme_icon(t, "app");
 }
@@ -979,7 +979,7 @@ static bool handle_binding(struct server *s, xkb_keysym_t sym, uint32_t mods) {
 		return true;
 	}
 	if ((mods & WLR_MODIFIER_LOGO) && sym == XKB_KEY_e) {
-		spawn("pcmanfm-qt");
+		spawn("expede-explorer");
 		return true;
 	}
 	return false;
@@ -1253,7 +1253,6 @@ static const char *default_assets(void) {
 
 /* ~/.config/expede/expede.conf, "key = value" lines:
  *   snap = true            drag to the top to maximise, to a side for half the screen
- *   start_menu = modern    type-to-search Start menu with an app list
  *   tap_to_click = false   touchpad taps don't click (on by default)
  *   scale = 150            screen scale in percent; "auto" (default) goes by the screen's DPI
  *   natural_scroll = false touchpad content follows your fingers (on by default)
@@ -1305,8 +1304,8 @@ static void load_config(struct server *s) {
 			s->opt_snap = conf_true(val);
 		else if (!strcmp(key, "tap_to_click"))
 			s->opt_tap = conf_true(val);
-		else if (!strcmp(key, "start_menu"))
-			s->opt_modern_start = !strcasecmp(val, "modern");
+		/* "start_menu = modern" (the old hybrid mode) is retired: its search lives on
+		 * in the Windows 7 Start menu */
 		else if (!strcmp(key, "natural_scroll"))
 			s->opt_natural_scroll = conf_true(val);
 		else if (!strcmp(key, "pointer_speed"))
