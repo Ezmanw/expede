@@ -463,7 +463,7 @@ ICONS = [
     ('imageres.dll', 131, 'file-audio'), ('imageres.dll', 23, 'file-video'), ('imageres.dll', 15, 'file-program'),
     ('imageres.dll', 69, 'file-config'), ('imageres.dll', 124, 'file-font'), ('imageres.dll', 90, 'file-document'),
     ('imageres.dll', 32, 'drive-disk'), ('imageres.dll', 30, 'drive-removable'), ('imageres.dll', 56, 'drive-cd'),
-    ('imageres.dll', 33, 'drive-network'), ('imageres.dll', 105, 'desktop'), ('imageres.dll', 81, 'properties'),
+    ('imageres.dll', 33, 'drive-network'), ('imageres.dll', 183, 'desktop'), ('imageres.dll', 81, 'properties'),
     ('imageres.dll', 1029, 'log-off'), ('imageres.dll', 1013, 'users'), ('imageres.dll', 1024, 'favorites'),
     ('imageres.dll', 184, 'downloads'), ('imageres.dll', 1005, 'videos'), ('imageres.dll', 1020, 'games'),
     ('imageres.dll', 1022, 'homegroup'),
@@ -474,6 +474,9 @@ ICONS = [
     ('imageres.dll', 120, 'cp-network'), ('imageres.dll', 87, 'cp-programs'), ('imageres.dll', 150, 'cp-performance'),
     ('imageres.dll', 86, 'cp-accessibility'), ('imageres.dll', 51, 'cp-printer'), ('imageres.dll', 1001, 'cp-power'),
     ('imageres.dll', 1029, 'cp-system'), ('imageres.dll', 78, 'cp-security'),
+    ('SndVolSSO.dll', 124, 'volume'), ('SndVolSSO.dll', 120, 'volume-muted'),
+    ('SndVolSSO.dll', 121, 'volume-0'), ('SndVolSSO.dll', 122, 'volume-1'),
+    ('SndVolSSO.dll', 123, 'volume-2'), ('SndVolSSO.dll', 100, 'sndvol'),
     ('notepad.exe', 2, 'notepad'), ('cmd.exe', 'IDI_APPICON', 'cmd'),
 ]
 

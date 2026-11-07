@@ -90,19 +90,29 @@ struct shell {
 	bool modern, all_mode;
 	char query[128];
 	int *results, n_results, scroll, list_sel, list_hot;
-	/* the tray speaker and XP's Volume pop-up */
+	/* the tray speaker and Volume / Battery pop-ups */
 	bool vol_ok, vol_open, vol_drag, vol_muted;
 	int vol_pct;
 	struct wlr_box vol_icon_box; /* taskbar coords */
 	struct wlr_box vol_box;      /* layout coords */
-	struct icon_set vol_icon, vol_icon_muted;
+	struct icon_set vol_icon, vol_icon_muted, vol_icon_0, vol_icon_1, vol_icon_2, sndvol_icon;
 	struct wlr_scene_buffer *volpop;
+	bool bat_open;
+	struct wlr_box bat_icon_box; /* taskbar coords */
+	struct wlr_box bat_box;      /* layout coords */
+	struct wlr_scene_buffer *batpop;
 };
 
 #define VOL_W 72
 #define VOL_H 160
 #define VOL_TRACK_TOP 30
 #define VOL_TRACK_H 88
+#define W7_VOL_W 86
+#define W7_VOL_H 228
+#define W7_VOL_TOP 66
+#define W7_VOL_TH 96
+#define BAT_POP_W 200
+#define BAT_POP_H 78
 
 static void show(struct wlr_scene_buffer **node, struct wlr_scene_tree *parent, cairo_surface_t *s, int x, int y) {
 	scene_show(node, parent, s, x, y);
@@ -420,12 +430,17 @@ static void draw_taskbar7(struct shell *sh) {
 	int tx = cx;
 	if (sh->bat_pct >= 0) {
 		tx -= 24;
+		sh->bat_icon_box = (struct wlr_box){tx, 8, 24, 24};
 		draw_battery(cr, sh, tx + 4, 12);
 	}
 	if (sh->vol_ok) {
 		tx -= 26;
 		sh->vol_icon_box = (struct wlr_box){tx, 8, 24, 24};
-		draw_surface(cr, (sh->vol_muted ? sh->vol_icon_muted : sh->vol_icon).s16, tx + 4, 12);
+		cairo_surface_t *vic = sh->vol_muted ? sh->vol_icon_muted.s16 :
+			sh->vol_pct == 0 && sh->vol_icon_0.s16 ? sh->vol_icon_0.s16 :
+			sh->vol_pct < 33 && sh->vol_icon_1.s16 ? sh->vol_icon_1.s16 :
+			sh->vol_pct < 66 && sh->vol_icon_2.s16 ? sh->vol_icon_2.s16 : sh->vol_icon.s16;
+		draw_surface(cr, vic, tx + 4, 12);
 	}
 
 	/* task buttons: running windows, icon only */
@@ -486,8 +501,11 @@ static void draw_taskbar(struct shell *sh) {
 		sh->vol_icon_box = (struct wlr_box){tx + 17, 5, 20, 20};
 		draw_surface(cr, (sh->vol_muted ? sh->vol_icon_muted : sh->vol_icon).s16, tx + 19, 7);
 	}
-	if (sh->bat_pct >= 0)
-		draw_battery(cr, sh, tx + 19 + (sh->vol_ok ? 22 : 0), 6);
+	if (sh->bat_pct >= 0) {
+		int bx = tx + 19 + (sh->vol_ok ? 22 : 0);
+		sh->bat_icon_box = (struct wlr_box){bx - 2, 5, 20, 20};
+		draw_battery(cr, sh, bx, 6);
+	}
 	draw_text(cr, "Tahoma 8", sh->clock, tx + trayw - 12 - cw, 8, 0, 0xffffff, 0, 0, 0, true);
 
 	/* task buttons */
@@ -537,7 +555,69 @@ static int clock_timer(void *data) {
 	return 0;
 }
 
-/* ---------------------------------------------------------------- volume */
+/* ---------------------------------------------------------------- volume & battery pop-ups */
+
+static void load_tray_icons(struct shell *sh) {
+	struct theme *vt = bar_theme(sh);
+	sh->vol_icon = theme_icon(vt, "volume");
+	if (!sh->vol_icon.s16) {
+		vt = sh->server->have_xp ? &sh->server->theme : &sh->server->theme7;
+		sh->vol_icon = theme_icon(vt, "volume");
+	}
+	sh->vol_icon_muted = theme_icon(vt, "volume-muted");
+	sh->vol_icon_0 = theme_icon(vt, "volume-0");
+	sh->vol_icon_1 = theme_icon(vt, "volume-1");
+	sh->vol_icon_2 = theme_icon(vt, "volume-2");
+	sh->sndvol_icon = theme_icon(vt, "sndvol");
+	if (!sh->sndvol_icon.s32)
+		sh->sndvol_icon = theme_icon(vt, "cp-sounds");
+}
+
+static void draw_batpop(struct shell *sh) {
+	if (!sh->bat_open || sh->bat_pct < 0) {
+		if (sh->batpop)
+			wlr_scene_node_set_enabled(&sh->batpop->node, false);
+		return;
+	}
+	bool w7 = bar7(sh);
+	theme_use_fonts(bar_theme(sh));
+	cairo_surface_t *s = canvas_new(BAT_POP_W, BAT_POP_H);
+	cairo_t *cr = cairo_create(s);
+	if (w7) {
+		fill(cr, 0, 0, BAT_POP_W, BAT_POP_H, 0x556677);
+		fill(cr, 1, 1, BAT_POP_W - 2, BAT_POP_H - 2, 0xd8e6f6);
+		fill(cr, 4, 4, BAT_POP_W - 8, BAT_POP_H - 30, 0xffffff);
+		fill(cr, 4, BAT_POP_H - 26, BAT_POP_W - 8, 22, 0xf1f5fb);
+		fill(cr, 4, BAT_POP_H - 26, BAT_POP_W - 8, 1, 0xd6e5f5);
+	} else {
+		fill(cr, 0, 0, BAT_POP_W, BAT_POP_H, 0x716f64);
+		fill(cr, 1, 1, BAT_POP_W - 2, BAT_POP_H - 2, 0xffffff);
+		fill(cr, 2, 2, BAT_POP_W - 3, BAT_POP_H - 3, 0xaca899);
+		fill(cr, 2, 2, BAT_POP_W - 4, BAT_POP_H - 4, 0xece9d8);
+	}
+	draw_battery(cr, sh, 14, 14);
+	char line1[64];
+	snprintf(line1, sizeof(line1), "%d%% available", sh->bat_pct);
+	draw_text(cr, "Tahoma Bold 8", line1, 38, 12, BAT_POP_W - 46, 0x000000, 0, 0, 0, true);
+	const char *line2 = sh->bat_charging ? "(plugged in, charging)" : "On battery power";
+	draw_text(cr, "Tahoma 8", line2, 38, 28, BAT_POP_W - 46, 0x5a5a5a, 0, 0, 0, true);
+	draw_text(cr, "Tahoma 8", "More power options", 14, BAT_POP_H - 21, BAT_POP_W - 24, 0x0066cc, 0, 0, 0, true);
+	cairo_destroy(cr);
+	show(&sh->batpop, sh->server->layer_menu, s, sh->bat_box.x, sh->bat_box.y);
+	wlr_scene_node_set_enabled(&sh->batpop->node, true);
+}
+
+static void bat_set_open(struct shell *sh, bool open) {
+	sh->bat_open = open && sh->bat_pct >= 0;
+	if (sh->bat_open) {
+		read_battery(sh);
+		int x = sh->bat_icon_box.x + sh->bat_icon_box.width / 2 - BAT_POP_W / 2;
+		if (x + BAT_POP_W > sh->w - 4)
+			x = sh->w - BAT_POP_W - 4;
+		sh->bat_box = (struct wlr_box){x, sh->h - bar_h(sh) - BAT_POP_H - 2, BAT_POP_W, BAT_POP_H};
+	}
+	draw_batpop(sh);
+}
 
 static void draw_volpop(struct shell *sh) {
 	if (!sh->vol_open) {
@@ -545,32 +625,72 @@ static void draw_volpop(struct shell *sh) {
 			wlr_scene_node_set_enabled(&sh->volpop->node, false);
 		return;
 	}
-	struct theme *t = &sh->server->theme;
-	cairo_surface_t *s = canvas_new(VOL_W, VOL_H);
-	cairo_t *cr = cairo_create(s);
-	/* dialog face with a thin raised frame, like XP's tray volume pop-up */
-	fill(cr, 0, 0, VOL_W, VOL_H, 0x716f64);
-	fill(cr, 1, 1, VOL_W - 2, VOL_H - 2, 0xffffff);
-	fill(cr, 2, 2, VOL_W - 3, VOL_H - 3, 0xaca899);
-	fill(cr, 2, 2, VOL_W - 4, VOL_H - 4, 0xece9d8);
-	int tw = text_width("Tahoma 8", "Volume");
-	draw_text(cr, "Tahoma 8", "Volume", (VOL_W - tw) / 2, 9, 0, 0x000000, 0, 0, 0, true);
-
-	int cx = VOL_W / 2;
-	draw_image(cr, &t->slider_track, 0, cx - 2, VOL_TRACK_TOP, 5, VOL_TRACK_H);
-	for (int i = 0; i <= 5; i++) {
-		int y = VOL_TRACK_TOP + i * VOL_TRACK_H / 5;
-		fill(cr, cx - 16, y, 4, 1, 0x000000);
-		fill(cr, cx + 13, y, 4, 1, 0x000000);
-	}
+	bool w7 = bar7(sh);
+	struct theme *t = bar_theme(sh);
+	theme_use_fonts(t);
+	int vw = w7 ? W7_VOL_W : VOL_W, vh = w7 ? W7_VOL_H : VOL_H;
+	int ttop = w7 ? W7_VOL_TOP : VOL_TRACK_TOP, th = w7 ? W7_VOL_TH : VOL_TRACK_H;
 	int pct = sh->vol_pct > 100 ? 100 : sh->vol_pct;
-	int ty = VOL_TRACK_TOP + (100 - pct) * VOL_TRACK_H / 100 - 5;
-	/* thumb frames: normal hot pressed focused disabled */
-	draw_image(cr, &t->slider_thumb, sh->vol_drag ? 2 : 0, cx - 10, ty, 21, 11);
+	char pct_str[16];
+	snprintf(pct_str, sizeof(pct_str), "%d%%", pct);
 
-	/* Mute checkbox: unchecked frames 0-3, checked 4-7 */
-	draw_frame_true(cr, t->checkbox, 12, sh->vol_muted ? 4 : 0, 12, VOL_H - 28);
-	draw_text(cr, "Tahoma 8", "Mute", 31, VOL_H - 28, 0, 0x000000, 0, 0, 0, true);
+	cairo_surface_t *s = canvas_new(vw, vh);
+	cairo_t *cr = cairo_create(s);
+	int cx = vw / 2;
+	if (w7) {
+		/* Windows 7 Aero volume flyout: outer frame, white body, footer strip */
+		fill(cr, 0, 0, vw, vh, 0x556677);
+		fill(cr, 1, 1, vw - 2, vh - 2, 0xd8e6f6);
+		fill(cr, 4, 4, vw - 8, vh - 32, 0xffffff);
+		fill(cr, 4, vh - 28, vw - 8, 24, 0xf1f5fb);
+		fill(cr, 4, vh - 28, vw - 8, 1, 0xd6e5f5);
+		if (sh->sndvol_icon.s32)
+			draw_scaled(cr, sh->sndvol_icon.s32, cx - 16, 10, 32);
+		int pw = text_width("Tahoma 8", pct_str);
+		draw_text(cr, "Tahoma 8", pct_str, (vw - pw) / 2, 44, 0, 0x1e395b, 0, 0, 0, true);
+		draw_image(cr, &t->slider_track, 0, cx - 2, ttop, 4, th);
+		for (int i = 0; i <= 5; i++) {
+			int y = ttop + i * th / 5;
+			fill(cr, cx + 10, y, 4, 1, 0xa0a0a0);
+		}
+		int ty = ttop + (100 - pct) * th / 100 - 5;
+		draw_image(cr, &t->slider_thumb, sh->vol_drag ? 2 : 0, cx - 10, ty, 21, 11);
+
+		/* Mute button with speaker icon */
+		int my = ttop + th + 10;
+		if (sh->vol_muted) {
+			fill(cr, cx - 13, my, 26, 24, 0x7da2ce);
+			fill(cr, cx - 12, my + 1, 24, 22, 0xd9ebf9);
+		}
+		cairo_surface_t *mic = (sh->vol_muted ? sh->vol_icon_muted : sh->vol_icon).s16;
+		draw_surface(cr, mic, cx - 8, my + 4);
+		int mw = text_width("Tahoma 8", "Mixer");
+		draw_text(cr, "Tahoma 8", "Mixer", (vw - mw) / 2, vh - 23, 0, 0x0066cc, 0, 0, 0, true);
+	} else {
+		/* dialog face with a thin raised frame, like XP's tray volume pop-up */
+		fill(cr, 0, 0, vw, vh, 0x716f64);
+		fill(cr, 1, 1, vw - 2, vh - 2, 0xffffff);
+		fill(cr, 2, 2, vw - 3, vh - 3, 0xaca899);
+		fill(cr, 2, 2, vw - 4, vh - 4, 0xece9d8);
+		char hdr[24];
+		snprintf(hdr, sizeof(hdr), "Vol %d%%", pct);
+		int tw = text_width("Tahoma 8", hdr);
+		draw_text(cr, "Tahoma 8", hdr, (vw - tw) / 2, 9, 0, 0x000000, 0, 0, 0, true);
+
+		draw_image(cr, &t->slider_track, 0, cx - 2, ttop, 5, th);
+		for (int i = 0; i <= 5; i++) {
+			int y = ttop + i * th / 5;
+			fill(cr, cx - 16, y, 4, 1, 0x000000);
+			fill(cr, cx + 13, y, 4, 1, 0x000000);
+		}
+		int ty = ttop + (100 - pct) * th / 100 - 5;
+		/* thumb frames: normal hot pressed focused disabled */
+		draw_image(cr, &t->slider_thumb, sh->vol_drag ? 2 : 0, cx - 10, ty, 21, 11);
+
+		/* Mute checkbox: unchecked frames 0-3, checked 4-7 */
+		draw_frame_true(cr, t->checkbox, t->version == 7 ? 20 : 12, sh->vol_muted ? 4 : 0, 12, vh - 28);
+		draw_text(cr, "Tahoma 8", "Mute", 31, vh - 28, 0, 0x000000, 0, 0, 0, true);
+	}
 	cairo_destroy(cr);
 	show(&sh->volpop, sh->server->layer_menu, s, sh->vol_box.x, sh->vol_box.y);
 	wlr_scene_node_set_enabled(&sh->volpop->node, true);
@@ -584,18 +704,21 @@ static void vol_set_open(struct shell *sh, bool open) {
 	sh->vol_open = open;
 	sh->vol_drag = false;
 	if (open) {
+		bat_set_open(sh, false);
 		vol_refresh(sh);
-		int x = sh->vol_icon_box.x + sh->vol_icon_box.width / 2 - VOL_W / 2;
-		if (x + VOL_W > sh->w)
-			x = sh->w - VOL_W;
-		sh->vol_box = (struct wlr_box){x, sh->h - bar_h(sh) - VOL_H - 2, VOL_W, VOL_H};
+		int vw = bar7(sh) ? W7_VOL_W : VOL_W, vh = bar7(sh) ? W7_VOL_H : VOL_H;
+		int x = sh->vol_icon_box.x + sh->vol_icon_box.width / 2 - vw / 2;
+		if (x + vw > sh->w - 4)
+			x = sh->w - vw - 4;
+		sh->vol_box = (struct wlr_box){x, sh->h - bar_h(sh) - vh - 2, vw, vh};
 	}
 	draw_volpop(sh);
 	draw_taskbar(sh);
 }
 
 static void vol_drag_to(struct shell *sh, double y) {
-	int pct = 100 - (int)((y - sh->vol_box.y - VOL_TRACK_TOP) * 100 / VOL_TRACK_H + 0.5);
+	int ttop = bar7(sh) ? W7_VOL_TOP : VOL_TRACK_TOP, th = bar7(sh) ? W7_VOL_TH : VOL_TRACK_H;
+	int pct = 100 - (int)((y - sh->vol_box.y - ttop) * 100 / th + 0.5);
 	if (pct < 0) pct = 0;
 	if (pct > 100) pct = 100;
 	if (pct != sh->vol_pct) {
@@ -603,6 +726,8 @@ static void vol_drag_to(struct shell *sh, double y) {
 		volume_write(pct);
 	}
 	draw_volpop(sh);
+	if (bar7(sh))
+		draw_taskbar(sh);
 }
 
 /* true when the pop-up used the event */
@@ -617,13 +742,19 @@ static bool vol_button(struct shell *sh, double x, double y, bool pressed) {
 		return false;
 	if (!pressed)
 		return true;
+	bool w7 = bar7(sh);
+	int vw = w7 ? W7_VOL_W : VOL_W, vh = w7 ? W7_VOL_H : VOL_H;
+	int ttop = w7 ? W7_VOL_TOP : VOL_TRACK_TOP, th = w7 ? W7_VOL_TH : VOL_TRACK_H;
 	double lx = x - sh->vol_box.x, ly = y - sh->vol_box.y;
-	if (ly >= VOL_H - 32 && ly < VOL_H - 10) {
+	if (w7 && ly >= vh - 28) {
+		vol_set_open(sh, false);
+		spawn("expede-settings sounds");
+	} else if (ly >= (w7 ? ttop + th + 6 : vh - 32) && ly < (w7 ? vh - 28 : vh - 10)) {
 		sh->vol_muted = !sh->vol_muted;
 		volume_mute(sh->vol_muted);
 		draw_volpop(sh);
 		draw_taskbar(sh);
-	} else if (lx >= VOL_W / 2 - 16 && lx <= VOL_W / 2 + 16 && ly >= VOL_TRACK_TOP - 8 && ly <= VOL_TRACK_TOP + VOL_TRACK_H + 8) {
+	} else if (lx >= vw / 2 - 18 && lx <= vw / 2 + 18 && ly >= ttop - 8 && ly <= ttop + th + 8) {
 		sh->vol_drag = true;
 		vol_drag_to(sh, y);
 	}
@@ -1198,6 +1329,8 @@ bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 	}
 	if (sh->vol_open && in_box(&sh->vol_box, x, y))
 		return true;
+	if (sh->bat_open && in_box(&sh->bat_box, x, y))
+		return true;
 	if (sh->start_open) {
 		struct wlr_box mb = menu_box(sh);
 		if (sh->cascade_open && in_box(&sh->cascade_box, x, y)) {
@@ -1283,6 +1416,26 @@ static void activate_item(struct shell *sh, struct menu_item *m) {
 bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, bool over_view) {
 	struct wlr_box mb = menu_box(sh);
 	bool on_bar = y >= sh->h - bar_h(sh);
+	if (sh->bat_open) {
+		if (in_box(&sh->bat_box, x, y)) {
+			if (pressed && y - sh->bat_box.y >= BAT_POP_H - 26) {
+				bat_set_open(sh, false);
+				spawn("expede-settings power");
+			}
+			return true;
+		}
+		if (pressed)
+			bat_set_open(sh, false);
+		if (on_bar && sh->bat_pct >= 0 && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh))))
+			return true;
+	} else if (pressed && on_bar && sh->bat_pct >= 0 && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh)))) {
+		if (sh->start_open)
+			shell_toggle_start(sh);
+		if (sh->vol_open)
+			vol_set_open(sh, false);
+		bat_set_open(sh, true);
+		return true;
+	}
 	if (sh->vol_open || sh->vol_drag) {
 		if (vol_button(sh, x, y, pressed))
 			return true;
@@ -1471,6 +1624,11 @@ bool shell_axis(struct shell *sh, double x, double y, double delta) {
 void shell_reconfigure(struct shell *sh) {
 	if (sh->start_open)
 		shell_toggle_start(sh);
+	if (sh->vol_open)
+		vol_set_open(sh, false);
+	if (sh->bat_open)
+		bat_set_open(sh, false);
+	load_tray_icons(sh);
 	for (int i = 0; i < sh->n_icons; i++)
 		sh->icons[i].img = theme_icon(desk_theme(sh), sh->icons[i].icon);
 	for (int i = 0; i < sh->n_items; i++)
@@ -1501,9 +1659,7 @@ struct shell *shell_create(struct server *s) {
 	tick(sh);
 	apps_load();
 	update_results(sh);
-	struct theme *vt = s->have_xp ? &s->theme : &s->theme7;
-	sh->vol_icon = theme_icon(vt, "volume");
-	sh->vol_icon_muted = theme_icon(vt, "volume-muted");
+	load_tray_icons(sh);
 	sh->vol_ok = volume_available() && sh->vol_icon.s16;
 	if (sh->vol_ok)
 		vol_refresh(sh);
