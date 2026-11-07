@@ -1267,8 +1267,22 @@ static void pkg_search(void) {
 	pkg_sel = -1;
 	if (!pkg_query[0])
 		return;
-	char q[300], cmd[512];
-	snprintf(cmd, sizeof(cmd), "apt-cache search --names-only %s | sort | head -n 200", ui_shell_quote(pkg_query, q, sizeof(q)));
+	char q[300], cmd[768];
+	ui_shell_quote(pkg_query, q, sizeof(q));
+	if (have("apt-cache"))
+		snprintf(cmd, sizeof(cmd), "apt-cache search --names-only %s | sort | head -n 200", q);
+	else if (have("pacman"))
+		snprintf(cmd, sizeof(cmd), "pacman -Ss %s | awk '/^[^ ]/{split($1,a,\"/\"); n=a[2]; getline; sub(/^[ \\t]+/,\"\"); print n \" - \" $0}' | head -n 200", q);
+	else if (have("dnf"))
+		snprintf(cmd, sizeof(cmd), "dnf -q search %s | awk -F' : ' 'NF==2 && $1 !~ /^=/{sub(/\\.(x86_64|noarch|i686|aarch64)$/,\"\",$1); sub(/^[ \\t]+/,\"\",$1); print $1 \" - \" $2}' | head -n 200", q);
+	else if (have("zypper"))
+		snprintf(cmd, sizeof(cmd), "zypper --non-interactive search %s | awk -F'|' 'NR>2 && NF>=3{gsub(/^[ \\t]+|[ \\t]+$/,\"\",$2); gsub(/^[ \\t]+|[ \\t]+$/,\"\",$3); if($2!=\"\" && $2!=\"Name\") print $2 \" - \" $3}' | head -n 200", q);
+	else if (have("xbps-query"))
+		snprintf(cmd, sizeof(cmd), "xbps-query -Rs %s | awk '{n=$2; sub(/-[^-]+$/,\"\",n); $1=\"\"; $2=\"\"; sub(/^[ \\t]+/,\"\"); print n \" - \" $0}' | head -n 200", q);
+	else if (have("apk"))
+		snprintf(cmd, sizeof(cmd), "apk search -v %s | awk '{n=$1; sub(/-[0-9].*$/,\"\",n); print n \" - \" $0}' | head -n 200", q);
+	else
+		return;
 	char *out = capture(cmd), *save;
 	for (char *line = strtok_r(out, "\n", &save); line && n_pkg_hits < 200; line = strtok_r(NULL, "\n", &save)) {
 		char *sep = strstr(line, " - ");
@@ -1285,12 +1299,22 @@ static void pkg_search(void) {
 		pkg_sel = 0;
 }
 
+static const char *pkg_install_cmd(void) {
+	if (have("apt")) return "sudo apt install";
+	if (have("pacman")) return "sudo pacman -S";
+	if (have("dnf")) return "sudo dnf install";
+	if (have("zypper")) return "sudo zypper install";
+	if (have("xbps-install")) return "sudo xbps-install -S";
+	if (have("apk")) return "sudo apk add";
+	return "sudo apt install";
+}
+
 static void pkg_install(void) {
 	if (pkg_sel < 0 || pkg_sel >= n_pkg_hits)
 		return;
 	char q[160], cmd[512];
 	ui_shell_quote(pkg_hits[pkg_sel].name, q, sizeof(q));
-	snprintf(cmd, sizeof(cmd), "foot -T 'Add New Programs' sh -c \"sudo apt install %s; echo; read -p 'Press Enter to close.' x\"", q);
+	snprintf(cmd, sizeof(cmd), "foot -T 'Add New Programs' sh -c \"%s %s; echo; read -p 'Press Enter to close.' x\"", pkg_install_cmd(), q);
 	spawn(cmd);
 }
 
@@ -1332,7 +1356,7 @@ static void paint_programs(struct sheet *s, cairo_t *cr) {
 		ui_reg(w, side[i].id, 4, y, 88, 88);
 	}
 	if (s->tab == 1) {
-		ui_text(cr, "Tahoma Bold 8", "Add a program from Debian:", 108, 12, 0, 0x000000);
+		ui_text(cr, "Tahoma Bold 8", "Add a program from your Linux distribution:", 108, 12, 0, 0x000000);
 		ui_field(w, cr, ID_PKG_QUERY, 106, 32, w->w - 286, 22, pkg_query, true, pkg_caret);
 		ui_button(w, cr, ID_SEARCH_PKGS, w->w - 172, 31, 74, "Search", false, true);
 		ui_button(w, cr, ID_PKG_TERM, w->w - 92, 31, 80, "Terminal...", false, false);
@@ -2001,6 +2025,16 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 			ui_shell_quote(f, q, sizeof(q));
 			if (strstr(f, "/flatpak/"))
 				snprintf(cmd, sizeof(cmd), "foot -T 'Remove Program' sh -c \"flatpak uninstall \\$(basename %s .desktop); echo; read -p 'Press Enter to close.' x\"", q);
+			else if (have("pacman"))
+				snprintf(cmd, sizeof(cmd), "foot -T 'Remove Program' sh -c \"sudo pacman -Rns \\$(pacman -Qoq %s | head -1); echo; read -p 'Press Enter to close.' x\"", q);
+			else if (have("dnf"))
+				snprintf(cmd, sizeof(cmd), "foot -T 'Remove Program' sh -c \"sudo dnf remove \\$(rpm -qf --qf '%%{NAME}\\n' %s | head -1); echo; read -p 'Press Enter to close.' x\"", q);
+			else if (have("zypper"))
+				snprintf(cmd, sizeof(cmd), "foot -T 'Remove Program' sh -c \"sudo zypper remove \\$(rpm -qf --qf '%%{NAME}\\n' %s | head -1); echo; read -p 'Press Enter to close.' x\"", q);
+			else if (have("xbps-remove"))
+				snprintf(cmd, sizeof(cmd), "foot -T 'Remove Program' sh -c \"sudo xbps-remove -R \\$(xbps-query -o %s | awk '{print \\$1}' | head -1); echo; read -p 'Press Enter to close.' x\"", q);
+			else if (have("apk"))
+				snprintf(cmd, sizeof(cmd), "foot -T 'Remove Program' sh -c \"sudo apk del \\$(apk info -qW %s | head -1); echo; read -p 'Press Enter to close.' x\"", q);
 			else
 				snprintf(cmd, sizeof(cmd), "foot -T 'Remove Program' sh -c \"sudo apt remove \\$(dpkg -S %s | cut -d: -f1 | head -1); echo; read -p 'Press Enter to close.' x\"", q);
 			spawn(cmd);
@@ -2022,9 +2056,12 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 	case ID_INSTALL_PKG:
 		pkg_install();
 		break;
-	case ID_PKG_TERM:
-		spawn("foot -T 'Add New Programs' sh -c \"echo 'Install programs with:  sudo apt install <name>'; echo; exec bash\"");
+	case ID_PKG_TERM: {
+		char cmd[256];
+		snprintf(cmd, sizeof(cmd), "foot -T 'Add New Programs' sh -c \"echo 'Install programs with:  %s <name>'; echo; exec \\${SHELL:-sh}\"", pkg_install_cmd());
+		spawn(cmd);
 		break;
+	}
 	case ID_APPLY: config_save(); break;
 	case ID_OK:
 		if (memcmp(&cfg, &saved, sizeof(cfg)))

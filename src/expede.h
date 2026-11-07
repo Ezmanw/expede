@@ -90,6 +90,8 @@ struct server {
 	struct wlr_box grab_box;
 	uint32_t resize_edges;
 	bool snip_dragging;
+	int snip_mode, snip_hot;
+	struct view *snip_view;
 	struct wlr_scene_buffer *snip_overlay;
 	uint32_t last_click_ms;
 	/* options from ~/.config/expede/expede.conf */

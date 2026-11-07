@@ -1315,13 +1315,39 @@ static void screenshot_window(struct server *s) {
 	save_screenshot(s, capture_box(&v->tree->node, 0, 0, (struct wlr_box){0, 0, fw, fh}));
 }
 
+static const char *const snip_labels[4] = {"Rectangular", "Window", "Full-screen", "Cancel"};
+
+static void snip_bar_box(int sw, struct wlr_box *bar, struct wlr_box btns[4]) {
+	static const int widths[4] = {92, 72, 88, 66};
+	int bw = 6 + widths[0] + 6 + widths[1] + 6 + widths[2] + 6 + widths[3] + 6, bh = 36;
+	int bx = (sw - bw) / 2, by = 14;
+	*bar = (struct wlr_box){bx, by, bw, bh};
+	int x = bx + 6;
+	for (int i = 0; i < 4; i++) {
+		btns[i] = (struct wlr_box){x, by + 5, widths[i], bh - 10};
+		x += widths[i] + 6;
+	}
+}
+
+static int snip_btn_at(struct server *s, double lx, double ly) {
+	int sw, sh;
+	server_screen(s, &sw, &sh);
+	struct wlr_box bar, btns[4];
+	snip_bar_box(sw, &bar, btns);
+	for (int i = 0; i < 4; i++)
+		if (lx >= btns[i].x && lx < btns[i].x + btns[i].width &&
+				ly >= btns[i].y && ly < btns[i].y + btns[i].height)
+			return i;
+	return (lx >= bar.x && lx < bar.x + bar.width && ly >= bar.y && ly < bar.y + bar.height) ? -2 : -1;
+}
+
 static void snip_redraw(struct server *s) {
 	int sw, sh;
 	server_screen(s, &sw, &sh);
 	cairo_surface_t *c = canvas_new(sw, sh);
 	cairo_t *cr = cairo_create(c);
 	/* Windows 7 Snipping Tool veil: milky white wash over the desktop */
-	cairo_set_source_rgba(cr, 1, 1, 1, 0.45);
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.42);
 	cairo_paint(cr);
 	if (s->snip_dragging && s->grab_box.width > 0 && s->grab_box.height > 0) {
 		struct wlr_box b = s->grab_box;
@@ -1330,23 +1356,83 @@ static void snip_redraw(struct server *s) {
 		cairo_rectangle(cr, b.x, b.y, b.width, b.height);
 		cairo_fill(cr);
 		cairo_restore(cr);
-		cairo_set_line_width(cr, 1);
+		cairo_set_line_width(cr, 1.5);
 		cairo_set_source_rgb(cr, 0.85, 0.08, 0.08);
 		cairo_rectangle(cr, b.x + 0.5, b.y + 0.5, b.width - 1, b.height - 1);
 		cairo_stroke(cr);
-	} else {
-		const char *msg = "Drag the cursor around the area you want to capture (Esc to cancel)";
+	} else if (s->snip_mode == 1 && s->snip_view && s->snip_view->mapped && !s->snip_view->minimized) {
+		struct view *v = s->snip_view;
+		int fw = view_frame_w(v), fh = caption_h(v) + v->ch + bottom_h(v);
+		cairo_save(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+		cairo_rectangle(cr, v->x, v->y, fw, fh);
+		cairo_fill(cr);
+		cairo_restore(cr);
+		cairo_set_line_width(cr, 2);
+		cairo_set_source_rgb(cr, 0.85, 0.08, 0.08);
+		cairo_rectangle(cr, v->x + 1, v->y + 1, fw - 2, fh - 2);
+		cairo_stroke(cr);
+	}
+	if (!s->snip_dragging) {
 		struct theme *t = theme_of(s, s->style);
 		theme_use_fonts(t);
+		struct wlr_box bar, btns[4];
+		snip_bar_box(sw, &bar, btns);
+		if (t->version == 7) {
+			round_path(cr, bar.x + 0.5, bar.y + 0.5, bar.width - 1, bar.height - 1, 5, 5);
+			cairo_pattern_t *g = cairo_pattern_create_linear(0, bar.y, 0, bar.y + bar.height);
+			cairo_pattern_add_color_stop_rgba(g, 0, 0.97, 0.98, 1.0, 0.96);
+			cairo_pattern_add_color_stop_rgba(g, 1, 0.88, 0.92, 0.97, 0.96);
+			cairo_set_source(cr, g);
+			cairo_fill_preserve(cr);
+			cairo_pattern_destroy(g);
+			cairo_set_line_width(cr, 1);
+			cairo_set_source_rgba(cr, 0.32, 0.42, 0.56, 0.9);
+			cairo_stroke(cr);
+		} else {
+			cairo_set_source_rgb(cr, 236 / 255.0, 233 / 255.0, 216 / 255.0);
+			cairo_rectangle(cr, bar.x, bar.y, bar.width, bar.height);
+			cairo_fill(cr);
+			cairo_set_line_width(cr, 1);
+			cairo_set_source_rgb(cr, 0.45, 0.45, 0.45);
+			cairo_rectangle(cr, bar.x + 0.5, bar.y + 0.5, bar.width - 1, bar.height - 1);
+			cairo_stroke(cr);
+		}
+		for (int i = 0; i < 4; i++) {
+			bool sel = (i == 0 && s->snip_mode == 0) || (i == 1 && s->snip_mode == 1);
+			bool hot = s->snip_hot == i;
+			struct wlr_box b = btns[i];
+			if (t->version == 7) {
+				if (sel || hot) {
+					round_path(cr, b.x + 0.5, b.y + 0.5, b.width - 1, b.height - 1, 3, 3);
+					if (sel)
+						cairo_set_source_rgba(cr, 0.76, 0.88, 1.0, 0.95);
+					else
+						cairo_set_source_rgba(cr, 0.88, 0.94, 1.0, 0.9);
+					cairo_fill_preserve(cr);
+					cairo_set_line_width(cr, 1);
+					cairo_set_source_rgba(cr, 0.20, 0.52, 0.86, sel ? 0.95 : 0.7);
+					cairo_stroke(cr);
+				}
+			} else if (t->push_button.s) {
+				draw_image(cr, &t->push_button, sel ? 2 : hot ? 1 : 0, b.x, b.y, b.width, b.height);
+			}
+			int tw = text_width("Tahoma 9", snip_labels[i]);
+			draw_text(cr, "Tahoma 9", snip_labels[i], b.x + (b.width - tw) / 2, b.y + 5, 0,
+				0x000000, 0, 0, 0, true);
+		}
+		const char *msg = s->snip_mode == 1
+			? "Click a window to capture it, or click Full-screen above (Esc to cancel)"
+			: "Drag the cursor around the area to capture, or click Full-screen / Window above";
 		int tw = text_width("Tahoma 9", msg);
-		int bw = tw + 24, bh = 28, bx = (sw - bw) / 2, by = 18;
-		round_path(cr, bx + 0.5, by + 0.5, bw - 1, bh - 1, 4, 4);
+		int pw = tw + 24, ph = 26, px = (sw - pw) / 2, py = bar.y + bar.height + 8;
+		round_path(cr, px + 0.5, py + 0.5, pw - 1, ph - 1, 4, 4);
 		cairo_set_source_rgba(cr, 1, 1, 0.92, 0.95);
 		cairo_fill_preserve(cr);
 		cairo_set_line_width(cr, 1);
 		cairo_set_source_rgb(cr, 0.45, 0.45, 0.45);
 		cairo_stroke(cr);
-		draw_text(cr, "Tahoma 9", msg, bx + 12, by + 6, 0, 0x000000, 0, 0, 0, true);
+		draw_text(cr, "Tahoma 9", msg, px + 12, py + 5, 0, 0x000000, 0, 0, 0, true);
 	}
 	cairo_destroy(cr);
 	scene_show(&s->snip_overlay, s->layer_overlay, c, 0, 0);
@@ -1355,36 +1441,33 @@ static void snip_redraw(struct server *s) {
 static void snip_end(struct server *s) {
 	s->grab = GRAB_NONE;
 	s->snip_dragging = false;
+	s->snip_hot = -1;
+	s->snip_view = NULL;
 	if (s->snip_overlay)
 		wlr_scene_node_set_enabled(&s->snip_overlay->node, false);
 	wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "default");
 }
 
 static void snip_begin(struct server *s) {
-	if (!s || (s->session && session_active(s->session)))
+	if (!s)
 		return;
-	if (s->shell && shell_start_open(s->shell))
-		shell_toggle_start(s->shell);
 	s->grab = GRAB_SNIP;
 	s->snip_dragging = false;
+	s->snip_mode = 0;
+	s->snip_hot = snip_btn_at(s, s->cursor->x, s->cursor->y);
+	s->snip_view = NULL;
 	s->grab_box = (struct wlr_box){0};
 	snip_redraw(s);
 	wlr_seat_pointer_clear_focus(s->seat);
-	wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "crosshair");
+	wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, s->snip_hot != -1 ? "default" : "crosshair");
 }
 
 static void process_motion(struct server *s, uint32_t time) {
 	reset_idle(s);
 	double lx = s->cursor->x, ly = s->cursor->y;
-	if (s->session && session_active(s->session)) {
-		s->grab = GRAB_NONE;
-		wlr_seat_pointer_clear_focus(s->seat);
-		session_motion(s->session, lx, ly);
-		return;
-	}
 	if (s->grab == GRAB_SNIP) {
-		wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "crosshair");
 		if (s->snip_dragging) {
+			wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "crosshair");
 			int sw, sh;
 			server_screen(s, &sw, &sh);
 			int x0 = (int)(s->grab_x < lx ? s->grab_x : lx);
@@ -1397,7 +1480,24 @@ static void process_motion(struct server *s, uint32_t time) {
 			if (y1 > sh) y1 = sh;
 			s->grab_box = (struct wlr_box){x0, y0, x1 - x0, y1 - y0};
 			snip_redraw(s);
+		} else {
+			int hit = snip_btn_at(s, lx, ly);
+			wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, hit != -1 ? "default" : "crosshair");
+			struct wlr_surface *surf;
+			double sx, sy;
+			struct view *hv = (s->snip_mode == 1 && hit == -1) ? view_at(s, lx, ly, &surf, &sx, &sy) : NULL;
+			if (hit != s->snip_hot || hv != s->snip_view) {
+				s->snip_hot = hit;
+				s->snip_view = hv;
+				snip_redraw(s);
+			}
 		}
+		return;
+	}
+	if (s->session && session_active(s->session)) {
+		s->grab = GRAB_NONE;
+		wlr_seat_pointer_clear_focus(s->seat);
+		session_motion(s->session, lx, ly);
 		return;
 	}
 	if (s->grab == GRAB_MOVE) {
@@ -1500,11 +1600,40 @@ static void on_cursor_button(struct wl_listener *l, void *data) {
 		if (e->button == BTN_RIGHT && pressed) {
 			snip_end(s);
 		} else if (e->button == BTN_LEFT && pressed) {
-			s->snip_dragging = true;
-			s->grab_x = lx;
-			s->grab_y = ly;
-			s->grab_box = (struct wlr_box){(int)lx, (int)ly, 0, 0};
-			snip_redraw(s);
+			int hit = snip_btn_at(s, lx, ly);
+			if (hit == 0) {
+				s->snip_mode = 0;
+				s->snip_view = NULL;
+				snip_redraw(s);
+			} else if (hit == 1) {
+				s->snip_mode = 1;
+				s->snip_view = focused_view(s);
+				snip_redraw(s);
+			} else if (hit == 2) {
+				snip_end(s);
+				screenshot_full(s);
+			} else if (hit == 3) {
+				snip_end(s);
+			} else if (hit == -1 && s->snip_mode == 1) {
+				struct wlr_surface *surf;
+				double sx, sy;
+				struct view *v = view_at(s, lx, ly, &surf, &sx, &sy);
+				if (!v)
+					v = focused_view(s);
+				snip_end(s);
+				if (v && v->mapped && !v->minimized) {
+					int fw = view_frame_w(v), fh = caption_h(v) + v->ch + bottom_h(v);
+					save_screenshot(s, capture_box(&v->tree->node, 0, 0, (struct wlr_box){0, 0, fw, fh}));
+				} else {
+					screenshot_full(s);
+				}
+			} else if (hit == -1) {
+				s->snip_dragging = true;
+				s->grab_x = lx;
+				s->grab_y = ly;
+				s->grab_box = (struct wlr_box){(int)lx, (int)ly, 0, 0};
+				snip_redraw(s);
+			}
 		} else if (e->button == BTN_LEFT && !pressed && s->snip_dragging) {
 			struct wlr_box b = s->grab_box;
 			snip_end(s);
@@ -1615,22 +1744,14 @@ static void cycle_windows(struct server *s) {
 	}
 }
 
+static bool is_print_key(xkb_keysym_t sym, uint32_t evdev_key) {
+	return sym == XKB_KEY_Print || sym == XKB_KEY_Sys_Req || sym == XKB_KEY_3270_PrintScreen ||
+		evdev_key == KEY_SYSRQ || evdev_key == KEY_PRINT;
+}
+
 static bool handle_binding(struct server *s, xkb_keysym_t sym, uint32_t mods) {
 	if ((mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) == (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) && sym == XKB_KEY_BackSpace) {
 		wl_display_terminate(s->display);
-		return true;
-	}
-	if (s->grab == GRAB_SNIP && sym == XKB_KEY_Escape) {
-		snip_end(s);
-		return true;
-	}
-	if (sym == XKB_KEY_Print || sym == XKB_KEY_Sys_Req) {
-		if (mods & WLR_MODIFIER_SHIFT)
-			snip_begin(s);
-		else if (mods & WLR_MODIFIER_ALT)
-			screenshot_window(s);
-		else
-			screenshot_full(s);
 		return true;
 	}
 	if ((mods & (WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT)) == (WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT) &&
@@ -1694,6 +1815,42 @@ static void kb_key(struct wl_listener *l, void *data) {
 	int n = xkb_state_key_get_syms(k->wlr_keyboard->xkb_state, keycode, &syms);
 	uint32_t mods = wlr_keyboard_get_modifiers(k->wlr_keyboard);
 	bool handled = false;
+	if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		for (int i = 0; i < n; i++) {
+			if (s->grab == GRAB_SNIP) {
+				if (syms[i] == XKB_KEY_Escape) {
+					snip_end(s);
+				} else if (syms[i] == XKB_KEY_Return || syms[i] == XKB_KEY_KP_Enter ||
+						syms[i] == XKB_KEY_space || is_print_key(syms[i], e->keycode)) {
+					snip_end(s);
+					screenshot_full(s);
+				} else if (syms[i] == XKB_KEY_w || syms[i] == XKB_KEY_W) {
+					s->snip_mode = 1;
+					s->snip_view = focused_view(s);
+					snip_redraw(s);
+				} else if (syms[i] == XKB_KEY_r || syms[i] == XKB_KEY_R) {
+					s->snip_mode = 0;
+					s->snip_view = NULL;
+					snip_redraw(s);
+				}
+				return;
+			}
+			if (is_print_key(syms[i], e->keycode)) {
+				if (mods & WLR_MODIFIER_ALT)
+					screenshot_window(s);
+				else
+					snip_begin(s);
+				return;
+			}
+		}
+		if (n == 0 && is_print_key(XKB_KEY_NoSymbol, e->keycode)) {
+			if (mods & WLR_MODIFIER_ALT)
+				screenshot_window(s);
+			else
+				snip_begin(s);
+			return;
+		}
+	}
 	if (s->session && session_active(s->session)) {
 		/* the Welcome screen and Turn Off dialog take the keyboard; Ctrl+Alt+Backspace still quits */
 		if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED)

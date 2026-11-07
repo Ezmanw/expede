@@ -358,7 +358,8 @@ LUNA_KEY_OVERRIDES = {'TASKBARTRAY': (255, 0, 0), 'LISTVIEWHEADER': (255, 0, 0)}
 
 
 def run7z(*args):
-    subprocess.run(['7z', *args], check=True, stdout=subprocess.DEVNULL)
+    cmd = next((c for c in ('7z', '7zz', '7za') if shutil.which(c)), '7z')
+    subprocess.run([cmd, *args], check=True, stdout=subprocess.DEVNULL)
 
 
 def main():

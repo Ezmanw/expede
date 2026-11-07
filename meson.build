@@ -28,10 +28,15 @@ foreach p : [wl_protocol_dir / 'stable/xdg-shell/xdg-shell.xml',
 		command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 endforeach
 
+wlroots = dependency('wlroots-0.18', required: false)
+if not wlroots.found()
+	wlroots = dependency('wlroots', version: ['>= 0.18.0', '< 0.19.0'])
+endif
+
 executable('expede',
 	'src/main.c', 'src/theme.c', 'src/shell.c', 'src/session.c', 'src/apps.c', 'src/volume.c', proto_src,
 	dependencies: [
-		dependency('wlroots-0.18'),
+		wlroots,
 		dependency('wayland-server'),
 		dependency('xkbcommon'),
 		dependency('libinput'),
@@ -69,3 +74,4 @@ executable('expede-explorer',
 install_data('data/expede.desktop', install_dir: get_option('datadir') / 'wayland-sessions')
 install_data('data/expede-settings.desktop', install_dir: get_option('datadir') / 'applications')
 install_data('tools/xprip.py', install_dir: get_option('bindir'), rename: 'expede-xprip', install_mode: 'rwxr-xr-x')
+install_data('tools/w7rip.py', install_dir: get_option('bindir'), rename: 'expede-w7rip', install_mode: 'rwxr-xr-x')
