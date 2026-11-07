@@ -176,7 +176,7 @@ static void glass_hl(cairo_t *cr, struct wlr_box b) {
 }
 
 /* one blur pass along a line of n pixels, step apart (ARGB, premultiplied) */
-static void blur_line(uint32_t *px, int n, int step, int r, uint32_t *tmp) {
+void blur_line(uint32_t *px, int n, int step, int r, uint32_t *tmp) {
 	for (int i = 0; i < n; i++)
 		tmp[i] = px[i * step];
 	int sum[4] = {0}, cnt = 0;
@@ -205,8 +205,26 @@ static void blur_line(uint32_t *px, int n, int step, int r, uint32_t *tmp) {
 	}
 }
 
-/* Aero glass shows what's behind it blurred; Expede blurs the desktop picture
- * (wallpaper and icons) once, small, and frames show the part under them */
+void blur_surface(cairo_surface_t *g, int r) {
+	cairo_surface_flush(g);
+	int gw = cairo_image_surface_get_width(g), gh = cairo_image_surface_get_height(g);
+	if (gw <= 0 || gh <= 0)
+		return;
+	uint32_t *px = (uint32_t *)cairo_image_surface_get_data(g);
+	int st = cairo_image_surface_get_stride(g) / 4;
+	uint32_t *tmp = malloc(sizeof(uint32_t) * (gw > gh ? gw : gh));
+	for (int pass = 0; pass < 3; pass++) {
+		for (int y = 0; y < gh; y++)
+			blur_line(px + y * st, gw, 1, r, tmp);
+		for (int x = 0; x < gw; x++)
+			blur_line(px + x, gh, st, r, tmp);
+	}
+	free(tmp);
+	cairo_surface_mark_dirty(g);
+}
+
+/* Aero glass shows what's behind it blurred; Expede pre-blurs the desktop picture
+ * (wallpaper and icons) for fast fallback, and blurs overlapping windows on demand */
 static void make_glass(struct shell *sh, cairo_surface_t *desk) {
 	struct server *s = sh->server;
 	int gw = sh->w / GLASS_DIV + 1, gh = sh->h / GLASS_DIV + 1;
@@ -217,22 +235,29 @@ static void make_glass(struct shell *sh, cairo_surface_t *desk) {
 	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
 	cairo_paint(cr);
 	cairo_destroy(cr);
-	cairo_surface_flush(g);
-	uint32_t *px = (uint32_t *)cairo_image_surface_get_data(g);
-	int st = cairo_image_surface_get_stride(g) / 4;
-	uint32_t *tmp = malloc(sizeof(uint32_t) * (gw > gh ? gw : gh));
-	for (int pass = 0; pass < 3; pass++) {
-		for (int y = 0; y < gh; y++)
-			blur_line(px + y * st, gw, 1, 3, tmp);
-		for (int x = 0; x < gw; x++)
-			blur_line(px + x, gh, st, 3, tmp);
-	}
-	free(tmp);
-	cairo_surface_mark_dirty(g);
+	blur_surface(g, 3);
 	if (s->glass_buf)
 		wlr_buffer_drop(s->glass_buf);
 	s->glass_buf = buffer_from_cairo(g);
 	server_glass_changed(s);
+}
+
+void shell_update_glass(struct shell *sh) {
+	if (!sh)
+		return;
+	struct server *srv = sh->server;
+	int bh = bar_h(sh);
+	if (bar7(sh)) {
+		glass_backdrop(srv, &sh->bar_glass, srv->layer_shell, 0, sh->h - bh, 0, sh->h - bh, sh->w, bh);
+		if (sh->bar_glass && sh->taskbar)
+			wlr_scene_node_place_below(&sh->bar_glass->node, &sh->taskbar->node);
+	}
+	if (menu7(sh) && sh->start_open) {
+		glass_backdrop(srv, &sh->menu_glass, srv->layer_menu, 0, sh->h - bh - W7_MENU_H,
+			0, sh->h - bh - W7_MENU_H, W7_MENU_W, W7_MENU_H);
+		if (sh->menu_glass && sh->menu)
+			wlr_scene_node_place_below(&sh->menu_glass->node, &sh->menu->node);
+	}
 }
 
 /* ---------------------------------------------------------------- desktop */

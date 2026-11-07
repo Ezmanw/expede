@@ -339,6 +339,34 @@ static void view_update_glass(struct view *v) {
 	}
 }
 
+static void render_node(cairo_t *cr, struct wlr_scene_node *n, int ox, int oy,
+	const struct wlr_box *clip, struct wlr_scene_node *stop_before, bool *stopped);
+
+/* true when any visible window behind stop_before (or the taskbar, for the Start menu)
+ * overlaps the blur halo of screen rect (x0..x1, y0..y1) */
+static bool glass_has_overlap(struct server *s, struct wlr_scene_tree *parent, int x0, int y0, int x1, int y1) {
+	int pad = 3 * GLASS_DIV;
+	int rx0 = x0 - pad, ry0 = y0 - pad, rx1 = x1 + pad, ry1 = y1 + pad;
+	if (parent == s->layer_menu && y1 > (ry1 - pad) - taskbar_h(s)) {
+		int sw, sh;
+		server_screen(s, &sw, &sh);
+		if (ry1 > sh - taskbar_h(s))
+			return true;
+	}
+	struct wlr_scene_node *n;
+	wl_list_for_each(n, &s->layer_views->children, link) {
+		if (n == &parent->node)
+			break;
+		struct view *v = n->data;
+		if (!v || !v->mapped || v->minimized || v->fullscreen)
+			continue;
+		int fw = view_frame_w(v), fh = caption_h(v) + v->ch + bottom_h(v);
+		if (v->x < rx1 && v->x + fw > rx0 && v->y < ry1 && v->y + fh > ry0)
+			return true;
+	}
+	return false;
+}
+
 void glass_backdrop(struct server *s, struct wlr_scene_buffer **node, struct wlr_scene_tree *parent,
 		int px, int py, int x, int y, int w, int h) {
 	if (!s->glass_buf || !s->opt_glass) {
@@ -358,13 +386,40 @@ void glass_backdrop(struct server *s, struct wlr_scene_buffer **node, struct wlr
 	}
 	if (!*node)
 		*node = wlr_scene_buffer_create(parent, s->glass_buf);
-	else if ((*node)->buffer != s->glass_buf)
-		wlr_scene_buffer_set_buffer(*node, s->glass_buf);
-	double bw = s->glass_buf->width, bh = s->glass_buf->height;
-	struct wlr_fbox src = {x0 * bw / sw, y0 * bh / sh, (x1 - x0) * bw / sw, (y1 - y0) * bh / sh};
-	if (src.x + src.width > bw) src.width = bw - src.x;
-	if (src.y + src.height > bh) src.height = bh - src.y;
-	wlr_scene_buffer_set_source_box(*node, &src);
+	if (glass_has_overlap(s, parent, x0, y0, x1, y1)) {
+		int pad = 3 * GLASS_DIV;
+		int cx0 = x0 - pad < 0 ? 0 : x0 - pad, cy0 = y0 - pad < 0 ? 0 : y0 - pad;
+		int cx1 = x1 + pad > sw ? sw : x1 + pad, cy1 = y1 + pad > sh ? sh : y1 + pad;
+		int gw = (cx1 - cx0 + GLASS_DIV - 1) / GLASS_DIV + 1;
+		int gh = (cy1 - cy0 + GLASS_DIV - 1) / GLASS_DIV + 1;
+		cairo_surface_t *g = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, gw, gh);
+		cairo_t *cr = cairo_create(g);
+		cairo_scale(cr, 1.0 / GLASS_DIV, 1.0 / GLASS_DIV);
+		cairo_translate(cr, -cx0, -cy0);
+		struct wlr_box clip = {cx0, cy0, cx1 - cx0, cy1 - cy0};
+		bool stopped = false;
+		render_node(cr, &s->scene->tree.node, 0, 0, &clip, &parent->node, &stopped);
+		cairo_destroy(cr);
+		blur_surface(g, 3);
+		struct wlr_buffer *buf = buffer_from_cairo(g);
+		wlr_scene_buffer_set_buffer(*node, buf);
+		wlr_buffer_drop(buf);
+		struct wlr_fbox src = {
+			(double)(x0 - cx0) / GLASS_DIV,
+			(double)(y0 - cy0) / GLASS_DIV,
+			(double)(x1 - x0) / GLASS_DIV,
+			(double)(y1 - y0) / GLASS_DIV,
+		};
+		wlr_scene_buffer_set_source_box(*node, &src);
+	} else {
+		if ((*node)->buffer != s->glass_buf)
+			wlr_scene_buffer_set_buffer(*node, s->glass_buf);
+		double bw = s->glass_buf->width, bh = s->glass_buf->height;
+		struct wlr_fbox src = {x0 * bw / sw, y0 * bh / sh, (x1 - x0) * bw / sw, (y1 - y0) * bh / sh};
+		if (src.x + src.width > bw) src.width = bw - src.x;
+		if (src.y + src.height > bh) src.height = bh - src.y;
+		wlr_scene_buffer_set_source_box(*node, &src);
+	}
 	wlr_scene_buffer_set_dest_size(*node, x1 - x0, y1 - y0);
 	wlr_scene_node_set_position(&(*node)->node, px + (x0 - x), py + (y0 - y));
 	wlr_scene_node_set_enabled(&(*node)->node, true);
@@ -385,11 +440,10 @@ static void view_redraw_w7(struct view *v) {
 	view_update_glass(v);
 }
 
-/* move a window's node, keeping its glass in step with the desktop behind it */
+/* move a window's node, keeping its glass and any glass above it in step */
 static void view_move_node(struct view *v) {
 	wlr_scene_node_set_position(&v->tree->node, v->x, v->y);
-	if (v->glass[0] || (w7(v) && v->server->opt_glass))
-		view_update_glass(v);
+	server_glass_changed(v->server);
 }
 
 void server_glass_changed(struct server *s) {
@@ -397,6 +451,36 @@ void server_glass_changed(struct server *s) {
 	wl_list_for_each(v, &s->views, link)
 		if (v->mapped)
 			view_update_glass(v);
+	shell_update_glass(s->shell);
+}
+
+/* refresh glass on windows stacked above v (and the taskbar/menu if v overlaps them) */
+static void glass_changed_above(struct view *v) {
+	struct server *s = v->server;
+	if (!s->opt_glass || !v->mapped || v->minimized)
+		return;
+	int fw = view_frame_w(v), fh = caption_h(v) + v->ch + bottom_h(v), pad = 3 * GLASS_DIV;
+	int vx0 = v->x - pad, vy0 = v->y - pad, vx1 = v->x + fw + pad, vy1 = v->y + fh + pad;
+	bool above = false;
+	struct wlr_scene_node *n;
+	wl_list_for_each(n, &s->layer_views->children, link) {
+		if (n == &v->tree->node) {
+			above = true;
+			continue;
+		}
+		if (!above)
+			continue;
+		struct view *u = n->data;
+		if (!u || !u->mapped || u->minimized || !w7(u) || u->csd || u->fullscreen)
+			continue;
+		int ufw = view_frame_w(u), ufh = caption_h(u) + u->ch + bottom_h(u);
+		if (u->x < vx1 && u->x + ufw > vx0 && u->y < vy1 && u->y + ufh > vy0)
+			view_update_glass(u);
+	}
+	int sw, sh;
+	server_screen(s, &sw, &sh);
+	if (vy1 > sh - taskbar_h(s) || (s->shell && shell_start_open(s->shell)))
+		shell_update_glass(s->shell);
 }
 
 static void view_redraw(struct view *v) {
@@ -491,6 +575,7 @@ void view_focus(struct view *v) {
 	v->active = true;
 	wlr_xdg_toplevel_set_activated(v->xt, true);
 	view_redraw(v);
+	server_glass_changed(s);
 	struct wlr_keyboard *kb = wlr_seat_get_keyboard(seat);
 	if (kb)
 		wlr_seat_keyboard_notify_enter(seat, v->xt->base->surface, kb->keycodes, kb->num_keycodes, &kb->modifiers);
@@ -521,6 +606,7 @@ void view_set_minimized(struct view *v, bool min) {
 		view_redraw(v);
 		focus_next_visible(v->server, v);
 	}
+	server_glass_changed(v->server);
 	shell_views_changed(v->server->shell);
 }
 
@@ -690,6 +776,7 @@ static void on_unmap(struct wl_listener *l, void *data) {
 		v->active = false;
 		focus_next_visible(v->server, v);
 	}
+	server_glass_changed(v->server);
 	shell_views_changed(v->server->shell);
 }
 
@@ -715,6 +802,9 @@ static void on_commit(struct wl_listener *l, void *data) {
 		v->cw = g.width;
 		v->ch = g.height;
 		view_redraw(v);
+		server_glass_changed(v->server);
+	} else if (v->mapped) {
+		glass_changed_above(v);
 	}
 	place_content(v);
 }

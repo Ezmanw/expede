@@ -121,15 +121,21 @@ struct server {
 };
 
 #define GLASS_DIV 4
+/* one blur pass along a line of n pixels, step apart (ARGB, premultiplied) */
+void blur_line(uint32_t *px, int n, int step, int r, uint32_t *tmp);
+/* blur a gw x gh CAIRO_FORMAT_ARGB32 image surface in place (3-pass box blur) */
+void blur_surface(cairo_surface_t *g, int r);
 /* the theme that draws a part: theme_of(s, s->st_frames) */
 struct theme *theme_of(struct server *s, int style);
 int taskbar_h(struct server *s);
-/* a node showing the blurred desktop under screen rect (x, y, w, h) (created on first use);
+/* a node showing the blurred scene behind screen rect (x, y, w, h) (created on first use);
  * hidden when glass is off. Keep it below whatever it backs. */
 void glass_backdrop(struct server *s, struct wlr_scene_buffer **node, struct wlr_scene_tree *parent,
 	int px, int py, int x, int y, int w, int h);
 /* shell.c made a new desktop picture: s->glass_buf changed */
 void server_glass_changed(struct server *s);
+/* update the taskbar and Start menu glass backdrops when windows behind them change */
+void shell_update_glass(struct shell *sh);
 /* draw the glass fill for a w x h panel at screen position (sx, sy): tint, streaks, edges */
 void draw_glass(struct server *s, cairo_t *cr, double x, double y, double w, double h, double r_top,
 	double r_bottom, bool active);
