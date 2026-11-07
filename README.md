@@ -75,7 +75,7 @@ XP's Control Panel, laid out the same way:
 Settings that need your password (like the time zone) ask through an XP-styled prompt (lxpolkit).
 
 ### Apps match too
-The ripper also builds a **GTK 3/4 theme** from the same Luna bitmaps. It covers buttons, checkboxes and radio buttons, scroll bars with XP's arrows, tabs, green block progress bars, combo boxes, list headers, menus and tooltips. Expede applies it to apps started inside it, so other desktop sessions keep their own look. GNOME's libadwaita apps keep their own style.
+The ripper also builds a **GTK 3/4 theme** from the same Luna bitmaps. It covers buttons, checkboxes and radio buttons, scroll bars with XP's arrows, tabs, green block progress bars, combo boxes, list headers, menus and tooltips. Expede applies it to apps started inside it, so other desktop sessions keep their own look. Qt apps (KDE apps, PCManFM-Qt) follow it too, through Qt's GTK platform theme. GNOME's libadwaita apps keep their own style.
 
 ### Works like a modern desktop underneath
 - **HiDPI:** the scale is picked from your screen's DPI (100–300%). The bitmaps are pixel-doubled so they stay crisp, and apps render sharp through fractional scaling.
@@ -164,7 +164,6 @@ vm/             a QEMU test VM that boots straight into Expede
 ## Roadmap
 
 - **Windows 7**, with the Frutiger Aero glass effect as a toggle and an option to mix XP and 7 parts
-- Qt apps themed to match (GTK is done)
 
 ## License
 

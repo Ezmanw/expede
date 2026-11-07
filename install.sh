@@ -10,7 +10,7 @@ sudo apt-get update -qq
 sudo apt-get install -y build-essential meson ninja-build pkg-config p7zip-full \
 	libwlroots-0.18-dev wayland-protocols libwayland-dev libxkbcommon-dev libcairo2-dev \
 	libpango1.0-dev libpixman-1-dev libinput-dev libgdk-pixbuf-2.0-dev libdrm-dev \
-	foot mousepad lxpolkit network-manager bluez power-profiles-daemon pcmanfm-qt qt6-wayland qtwayland5 fonts-dejavu-core alsa-utils brightnessctl
+	foot mousepad lxpolkit network-manager bluez power-profiles-daemon pcmanfm-qt qt6-wayland qtwayland5 qt6-gtk-platformtheme qt5-gtk-platformtheme fonts-dejavu-core alsa-utils brightnessctl
 
 echo "== Windows XP theme files"
 mkdir -p "$HOME/.local/share/expede" "$HOME/.local/share/fonts"

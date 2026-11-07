@@ -1631,6 +1631,9 @@ int main(int argc, char *argv[]) {
 	 * Luna bitmaps (only apps started inside Expede; other sessions are untouched) */
 	if (!getenv("GTK_THEME"))
 		setenv("GTK_THEME", "Expede-XP", true);
+	/* Qt apps take colours, fonts and dialogs from the GTK theme */
+	if (!getenv("QT_QPA_PLATFORMTHEME"))
+		setenv("QT_QPA_PLATFORMTHEME", "gtk3", true);
 	setenv("QT_QPA_PLATFORM", "wayland", true);
 	shell_layout(s.shell);
 	s.session = session_create(&s, autologin);
