@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -84,16 +85,48 @@ const char *ui_shell_quote(const char *s, char *out, size_t cap) {
 	return out;
 }
 
+static bool want_w7_style(void) {
+	char path[512], line[512], key[64], val[256];
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	if (xdg && *xdg)
+		snprintf(path, sizeof(path), "%s/expede/expede.conf", xdg);
+	else
+		snprintf(path, sizeof(path), "%s/.config/expede/expede.conf", getenv("HOME"));
+	FILE *f = fopen(path, "r");
+	bool is7 = false;
+	while (f && fgets(line, sizeof(line), f)) {
+		char *eq = strchr(line, '=');
+		if (line[0] == '#' || !eq || sscanf(line, " %63[^= ]", key) != 1 || strcmp(key, "style"))
+			continue;
+		char *v = eq + 1;
+		while (*v == ' ' || *v == '\t')
+			v++;
+		size_t n = strcspn(v, "\r\n");
+		while (n && (v[n - 1] == ' ' || v[n - 1] == '\t'))
+			n--;
+		snprintf(val, sizeof(val), "%.*s", (int)n, v);
+		is7 = !strcasecmp(val, "7") || !strcasecmp(val, "win7") || !strcasecmp(val, "windows7");
+	}
+	if (f)
+		fclose(f);
+	return is7;
+}
+
 const char *ui_assets_dir(void) {
 	static char buf[512];
 	const char *env = getenv("EXPEDE_ASSETS");
 	if (env)
 		return env;
+	char base[480], ini[540];
 	const char *xdg = getenv("XDG_DATA_HOME");
 	if (xdg && *xdg)
-		snprintf(buf, sizeof(buf), "%s/expede/xp", xdg);
+		snprintf(base, sizeof(base), "%s/expede", xdg);
 	else
-		snprintf(buf, sizeof(buf), "%s/.local/share/expede/xp", getenv("HOME"));
+		snprintf(base, sizeof(base), "%s/.local/share/expede", getenv("HOME"));
+	const char *pref = want_w7_style() ? "7" : "xp";
+	const char *alt = want_w7_style() ? "xp" : "7";
+	snprintf(ini, sizeof(ini), "%s/%s/luna/normalblue.ini", base, pref);
+	snprintf(buf, sizeof(buf), "%s/%s", base, access(ini, R_OK) == 0 ? pref : alt);
 	return buf;
 }
 
@@ -136,29 +169,36 @@ void ui_button(struct ui_win *w, cairo_t *cr, int id, int x, int y, int bw, cons
 	int f = disabled ? 3 : ui_state(w, id) ? ui_state(w, id) : def ? 4 : 0;
 	draw_image(cr, &ui_theme.push_button, f, x, y, bw, 23);
 	int tw = text_width("Tahoma 8", label);
-	ui_text(cr, "Tahoma 8", label, x + (bw - tw) / 2, y + 5, 0, disabled ? 0xaca899 : 0x000000);
+	ui_text(cr, "Tahoma 8", label, x + (bw - tw) / 2, y + (ui_theme.version == 7 ? 4 : 5), 0,
+		disabled ? (ui_theme.version == 7 ? 0x838383 : 0xaca899) : 0x000000);
 	if (!disabled)
 		ui_reg(w, id, x, y, bw, 23);
 }
 
 void ui_check(struct ui_win *w, cairo_t *cr, int id, int x, int y, bool on, bool radio, const char *label) {
 	/* checkbox: unchecked n/h/p/d, checked n/h/p/d...; radio: unchecked x4, checked x4 */
-	draw_frame_true(cr, radio ? ui_theme.radio : ui_theme.checkbox, radio ? 8 : 12, (on ? 4 : 0) + ui_state(w, id), x, y + 1);
-	ui_text(cr, "Tahoma 8", label, x + 19, y + 1, 0, 0x000000);
+	draw_frame_true(cr, radio ? ui_theme.radio : ui_theme.checkbox, radio ? 8 : ui_theme.version == 7 ? 20 : 12,
+		(on ? 4 : 0) + ui_state(w, id), x, y + 1);
+	ui_text(cr, "Tahoma 8", label, x + 19, y + (ui_theme.version == 7 ? 0 : 1), 0, 0x000000);
 	ui_reg(w, id, x, y, 19 + text_width("Tahoma 8", label) + 4, 16);
 }
 
 void ui_group(cairo_t *cr, int x, int y, int gw, int gh, const char *title) {
 	draw_image(cr, &ui_theme.groupbox, 0, x, y + 6, gw, gh - 6);
 	int tw = text_width("Tahoma 8", title);
-	ui_fill(cr, x + 6, y, tw + 6, 14, 0xfcfcfe);
-	ui_text(cr, "Tahoma 8", title, x + 9, y, 0, 0x0046d5);
+	ui_fill(cr, x + 6, y, tw + 6, 14, ui_theme.version == 7 ? 0xffffff : 0xfcfcfe);
+	ui_text(cr, "Tahoma 8", title, x + 9, y, 0, ui_theme.version == 7 ? 0x000000 : 0x0046d5);
 }
 
 void ui_field(struct ui_win *w, cairo_t *cr, int id, int x, int y, int fw, int fh, const char *text, bool focused, int caret) {
-	ui_fill(cr, x, y, fw, fh, 0x7f9db9);
-	ui_fill(cr, x + 1, y + 1, fw - 2, fh - 2, 0xffffff);
-	int ty = y + (fh - 13) / 2;
+	if (ui_theme.version == 7 && ui_theme.w7_edit.s) {
+		ui_fill(cr, x + 1, y + 1, fw - 2, fh - 2, 0xffffff);
+		draw_image(cr, &ui_theme.w7_edit, focused ? 2 : ui_state(w, id) ? 1 : 0, x, y, fw, fh);
+	} else {
+		ui_fill(cr, x, y, fw, fh, 0x7f9db9);
+		ui_fill(cr, x + 1, y + 1, fw - 2, fh - 2, 0xffffff);
+	}
+	int ty = y + (fh - (ui_theme.version == 7 ? 15 : 13)) / 2;
 	cairo_save(cr);
 	cairo_rectangle(cr, x + 2, y + 1, fw - 4, fh - 2);
 	cairo_clip(cr);
@@ -167,7 +207,7 @@ void ui_field(struct ui_win *w, cairo_t *cr, int id, int x, int y, int fw, int f
 		char before[1024];
 		snprintf(before, sizeof(before), "%.*s", caret, text);
 		int cx = x + 4 + (caret ? text_width("Tahoma 8", before) : 0);
-		ui_fill(cr, cx, ty, 1, 13, 0x000000);
+		ui_fill(cr, cx, ty, 1, ui_theme.version == 7 ? 15 : 13, 0x000000);
 	}
 	cairo_restore(cr);
 	ui_reg(w, id, x, y, fw, fh);
@@ -227,8 +267,8 @@ int ui_menu_height(const struct ui_menu_item *items, int n) {
 }
 
 void ui_menu(struct ui_win *w, cairo_t *cr, int base_id, int x, int y, const struct ui_menu_item *items, int n) {
-	/* XP's flat menus: white, a thin grey edge and a soft shadow, blue highlight */
 	int mw = 180, mh = ui_menu_height(items, n);
+	bool w7 = ui_theme.version == 7;
 	for (int i = 0; i < n; i++)
 		if (items[i].label) {
 			int tw = text_width(items[i].bold ? "Tahoma Bold 8" : "Tahoma 8", items[i].label) + 48;
@@ -244,21 +284,34 @@ void ui_menu(struct ui_win *w, cairo_t *cr, int base_id, int x, int y, const str
 	cairo_set_source_rgba(cr, 0, 0, 0, 0.18);
 	cairo_rectangle(cr, x + 3, y + 3, mw, mh);
 	cairo_fill(cr);
-	ui_fill(cr, x, y, mw, mh, 0xaca899);
-	ui_fill(cr, x + 1, y + 1, mw - 2, mh - 2, 0xffffff);
+	ui_fill(cr, x, y, mw, mh, w7 ? 0x979797 : 0xaca899);
+	ui_fill(cr, x + 1, y + 1, mw - 2, mh - 2, w7 ? 0xf0f0f0 : 0xffffff);
+	if (w7) {
+		ui_fill(cr, x + 26, y + 2, 1, mh - 4, 0xe2e3e3);
+		ui_fill(cr, x + 27, y + 2, 1, mh - 4, 0xffffff);
+	}
 	ui_reg(w, base_id - 1, x, y, mw, mh); /* the menu body itself swallows clicks */
 	int iy = y + 3;
 	for (int i = 0; i < n; i++) {
 		if (!items[i].label) {
-			ui_fill(cr, x + 2, iy + 4, mw - 4, 1, 0xaca899);
+			if (w7) {
+				ui_fill(cr, x + 28, iy + 4, mw - 30, 1, 0xe0e0e0);
+				ui_fill(cr, x + 28, iy + 5, mw - 30, 1, 0xffffff);
+			} else {
+				ui_fill(cr, x + 2, iy + 4, mw - 4, 1, 0xaca899);
+			}
 			iy += 9;
 			continue;
 		}
 		bool hot = w->hot == base_id + i && !items[i].disabled;
-		if (hot)
-			ui_fill(cr, x + 3, iy, mw - 6, 22, 0x316ac5);
-		ui_text(cr, items[i].bold ? "Tahoma Bold 8" : "Tahoma 8", items[i].label, x + 28, iy + 4, mw - 36,
-			items[i].disabled ? 0xaca899 : hot ? 0xffffff : 0x000000);
+		if (hot) {
+			if (w7 && ui_theme.w7_menu_item.s)
+				draw_image(cr, &ui_theme.w7_menu_item, 1, x + 3, iy, mw - 6, 22);
+			else
+				ui_fill(cr, x + 3, iy, mw - 6, 22, 0x316ac5);
+		}
+		ui_text(cr, items[i].bold ? "Tahoma Bold 8" : "Tahoma 8", items[i].label, x + 32, iy + 3, mw - 40,
+			items[i].disabled ? (w7 ? 0x838383 : 0xaca899) : (hot && !w7) ? 0xffffff : 0x000000);
 		if (!items[i].disabled)
 			ui_reg(w, base_id + i, x + 3, iy, mw - 6, 22);
 		iy += 22;
@@ -619,6 +672,7 @@ static const struct wl_registry_listener registry_listener = {.global = reg_glob
 bool ui_init(const char *who) {
 	if (!theme_load(&ui_theme, ui_assets_dir()))
 		return false;
+	theme_use_fonts(&ui_theme);
 	u.xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	u.display = wl_display_connect(NULL);
 	if (!u.display) {
@@ -633,6 +687,14 @@ bool ui_init(const char *who) {
 		return false;
 	}
 	return true;
+}
+
+void ui_reload_theme(void) {
+	const char *dir = ui_assets_dir();
+	if (strcmp(ui_theme.dir, dir)) {
+		theme_load(&ui_theme, dir);
+		theme_use_fonts(&ui_theme);
+	}
 }
 
 void ui_quit(void) {

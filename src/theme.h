@@ -44,6 +44,11 @@ struct theme {
 	struct image w7_tray_btn, w7_show_desktop, w7_sp_left, w7_sp_right, w7_sp_search;
 	struct image w7_sp_item, w7_sp_place, w7_sp_shutdown, w7_sp_shutdown_arrow, w7_sp_progs;
 	cairo_surface_t *w7_userframe;
+	struct image w7_edit, w7_menu_item, w7_list_hot, w7_list_sel, w7_list_hot_sel;
+	struct image w7_header, w7_scroll_track, w7_scroll_thumb, w7_progress_bar, w7_progress_fill;
+	cairo_surface_t *w7_scroll_grip, *w7_tree_glyph, *w7_tree_glyph_hot;
+	struct image w7_nav_bg, w7_addr_band, w7_crumb_btn, w7_search_box, w7_cmd_bar, w7_cmd_btn, w7_details_bg;
+	cairo_surface_t *w7_back, *w7_fwd, *w7_crumb_sep;
 };
 
 struct icon_set { cairo_surface_t *s16, *s32; };

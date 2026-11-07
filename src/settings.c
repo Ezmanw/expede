@@ -132,6 +132,8 @@ static void config_load(void) {
 	saved = cfg;
 }
 
+static void load_theme_assets(void);
+
 static void config_save(void) {
 	char path[512];
 	conf_path(path, sizeof(path));
@@ -181,6 +183,8 @@ static void config_save(void) {
 	}
 	fclose(f);
 	saved = cfg;
+	ui_reload_theme();
+	load_theme_assets();
 	spawn("pkill -HUP -x expede"); /* the running desktop rereads it */
 }
 
@@ -843,13 +847,25 @@ static void hint(cairo_t *cr, int x, int y, const char *s) {
 	ui_text(cr, "Tahoma 8", s, x, y, SHEET_W - x - 24, 0x5a5a5a);
 }
 
-/* horizontal Luna trackbar, value 0..100 */
+/* horizontal Luna/Aero trackbar, value 0..100, with a percentage popup bubble */
 static void slider(struct ui_win *w, cairo_t *cr, int id, int x, int y, int sw, int value, bool dragging) {
 	draw_image(cr, &ui_theme.slider_track, 0, x, y + 8, sw, 4);
 	for (int i = 0; i <= 10; i++)
 		ui_fill(cr, x + 5 + i * (sw - 11) / 10, y + 22, 1, 3, 0x000000);
 	int tx = x + value * (sw - 11) / 100;
-	draw_image(cr, &ui_theme.slider_thumb_h, dragging ? 2 : ui_state(w, id) == 1 ? 1 : 0, tx, y, 11, 21);
+	int st = dragging ? 2 : ui_state(w, id) == 1 ? 1 : 0;
+	draw_image(cr, &ui_theme.slider_thumb_h, st, tx, y, 11, 21);
+	if (st > 0) {
+		char pct[16];
+		snprintf(pct, sizeof(pct), "%d%%", value);
+		int tw = text_width("Tahoma 8", pct) + 10;
+		int bx = tx + 5 - tw / 2;
+		int by = y - 20;
+		bool w7 = ui_theme.version == 7;
+		ui_fill(cr, bx, by, tw, 17, w7 ? 0x767676 : 0x000000);
+		ui_fill(cr, bx + 1, by + 1, tw - 2, 15, w7 ? 0xf5f6f8 : 0xffffe1);
+		ui_text(cr, "Tahoma 8", pct, bx + 5, by + 2, 0, 0x000000);
+	}
 	ui_reg(w, id, x - 4, y - 2, sw + 8, 26);
 }
 
@@ -866,7 +882,8 @@ static int slider_value(struct ui_win *w, int id, double px) {
 /* a white list box; rows registered as base + index */
 static void listbox(struct ui_win *w, cairo_t *cr, int base, int x, int y, int lw, int lh, int n, int sel, int *scroll,
 		struct ui_rect *box, const char *(*label)(int i), cairo_surface_t *(*ic)(int i), int row_h) {
-	ui_fill(cr, x, y, lw, lh, 0x7f9db9);
+	bool w7 = ui_theme.version == 7;
+	ui_fill(cr, x, y, lw, lh, w7 ? 0xabadb3 : 0x7f9db9);
 	ui_fill(cr, x + 1, y + 1, lw - 2, lh - 2, 0xffffff);
 	*box = (struct ui_rect){0, x, y, lw, lh};
 	int rows = (lh - 4) / row_h;
@@ -879,8 +896,17 @@ static void listbox(struct ui_win *w, cairo_t *cr, int base, int x, int y, int l
 	cairo_clip(cr);
 	for (int r = 0; r < rows + 1 && *scroll + r < n; r++) {
 		int i = *scroll + r, ry = y + 2 + r * row_h;
-		if (i == sel)
-			ui_fill(cr, x + 2, ry, lw - 4 - (n > rows ? 6 : 0), row_h, 0x316ac5);
+		bool hot = w->hot == base + i;
+		int rw = lw - 4 - (n > rows ? 6 : 0);
+		if (w7 && (i == sel || hot)) {
+			struct image *hl = i == sel ? (hot && ui_theme.w7_list_hot_sel.s ? &ui_theme.w7_list_hot_sel : &ui_theme.w7_list_sel) : &ui_theme.w7_list_hot;
+			if (hl->s)
+				draw_image(cr, hl, 0, x + 2, ry, rw, row_h);
+			else
+				ui_fill(cr, x + 2, ry, rw, row_h, i == sel ? 0xcce8ff : 0xe5f3ff);
+		} else if (i == sel) {
+			ui_fill(cr, x + 2, ry, rw, row_h, 0x316ac5);
+		}
 		int tx = x + 5;
 		if (ic) {
 			cairo_surface_t *s = ic(i);
@@ -888,14 +914,15 @@ static void listbox(struct ui_win *w, cairo_t *cr, int base, int x, int y, int l
 				ui_icon(cr, s, x + 4, ry + (row_h - 16) / 2, 16);
 			tx += 22;
 		}
-		ui_text(cr, "Tahoma 8", label(i), tx, ry + (row_h - 13) / 2, lw - (tx - x) - 12, i == sel ? 0xffffff : 0x000000);
+		ui_text(cr, "Tahoma 8", label(i), tx, ry + (row_h - (w7 ? 15 : 13)) / 2, lw - (tx - x) - 12,
+			(i == sel && !w7) ? 0xffffff : 0x000000);
 		ui_reg(w, base + i, x + 2, ry, lw - 4, row_h);
 	}
 	cairo_restore(cr);
 	if (n > rows) {
 		double frac = (double)rows / n, pos = (double)*scroll / n;
-		ui_fill(cr, x + lw - 7, y + 2, 5, lh - 4, 0xeef2fb);
-		ui_fill(cr, x + lw - 7, y + 2 + pos * (lh - 4), 5, frac * (lh - 4), 0xa8bce8);
+		ui_fill(cr, x + lw - 7, y + 2, 5, lh - 4, w7 ? 0xf0f0f0 : 0xeef2fb);
+		ui_fill(cr, x + lw - 7, y + 2 + pos * (lh - 4), 5, frac * (lh - 4), w7 ? 0xcdcdcd : 0xa8bce8);
 	}
 }
 
@@ -907,8 +934,11 @@ static bool is_live(enum kind k) {
 static void tabs_and_buttons(struct sheet *s, cairo_t *cr) {
 	struct ui_win *w = s->win;
 	const struct applet *a = &applets[s->kind];
-	ui_fill(cr, 0, 0, w->w, w->h, 0xece9d8); /* XP's dialog face colour */
+	bool w7 = ui_theme.version == 7;
+	ui_fill(cr, 0, 0, w->w, w->h, w7 ? 0xf0f0f0 : 0xece9d8);
 	if (a->tabs[0]) {
+		if (w7)
+			ui_fill(cr, 7, 27, w->w - 14, w->h - 74, 0xffffff);
 		draw_image(cr, &ui_theme.tab_pane, 0, 6, 26, w->w - 12, w->h - 72);
 		int x = 8;
 		for (int i = 0; i < 4 && a->tabs[i]; i++) {
@@ -916,7 +946,7 @@ static void tabs_and_buttons(struct sheet *s, cairo_t *cr) {
 			bool sel = s->tab == i;
 			/* tab frames: normal hot selected disabled focused; the selected one stands taller */
 			draw_image(cr, &ui_theme.tab_item, sel ? 2 : ui_state(w, ID_TAB + i) == 1 ? 1 : 0, x, sel ? 6 : 8, tw, sel ? 22 : 20);
-			ui_text(cr, "Tahoma 8", a->tabs[i], x + 10, sel ? 10 : 12, 0, 0x000000);
+			ui_text(cr, "Tahoma 8", a->tabs[i], x + 10, sel ? (w7 ? 9 : 10) : (w7 ? 11 : 12), 0, 0x000000);
 			ui_reg(w, ID_TAB + i, x, 6, tw, 22);
 			x += tw;
 		}
@@ -1266,9 +1296,21 @@ static void pkg_install(void) {
 
 static void paint_programs(struct sheet *s, cairo_t *cr) {
 	struct ui_win *w = s->win;
-	ui_fill(cr, 0, 0, w->w, w->h, 0xece9d8);
-	/* XP's bar of big buttons down the left */
-	ui_fill(cr, 0, 0, 96, w->h, 0x7a96df);
+	bool w7 = ui_theme.version == 7;
+	ui_fill(cr, 0, 0, w->w, w->h, w7 ? 0xffffff : 0xece9d8);
+	if (w7) {
+		cairo_pattern_t *g = cairo_pattern_create_linear(0, 0, 0, w->h);
+		cairo_pattern_add_color_stop_rgb(g, 0, 220 / 255.0, 230 / 255.0, 244 / 255.0);
+		cairo_pattern_add_color_stop_rgb(g, 1, 233 / 255.0, 243 / 255.0, 255 / 255.0);
+		cairo_set_source(cr, g);
+		cairo_rectangle(cr, 0, 0, 96, w->h);
+		cairo_fill(cr);
+		cairo_pattern_destroy(g);
+		ui_fill(cr, 95, 0, 1, w->h, 0xd6e2f0);
+	} else {
+		/* XP's bar of big buttons down the left */
+		ui_fill(cr, 0, 0, 96, w->h, 0x7a96df);
+	}
 	static const struct { int id; const char *label, *icon; } side[] = {
 		{ID_CHANGE_PROGS, "Change or\nRemove\nPrograms", "cp-programs"}, {ID_ADD_PROGS, "Add New\nPrograms", "cp-programs"},
 		{ID_APPLET + K_DEFAULTS, "Set Program\nAccess and\nDefaults", "cp-system"},
@@ -1276,10 +1318,17 @@ static void paint_programs(struct sheet *s, cairo_t *cr) {
 	for (int i = 0; i < 3; i++) {
 		int y = 10 + i * 96;
 		bool cur = (i == 0 && s->tab == 0) || (i == 1 && s->tab == 1), hot = w->hot == side[i].id;
-		if (cur || hot)
-			ui_fill(cr, 4, y, 88, 88, cur ? 0x9db2ec : 0x8aa5e8);
+		if (cur || hot) {
+			if (w7 && (cur ? ui_theme.w7_list_sel.s : ui_theme.w7_list_hot.s))
+				draw_image(cr, cur ? &ui_theme.w7_list_sel : &ui_theme.w7_list_hot, 0, 4, y, 88, 88);
+			else
+				ui_fill(cr, 4, y, 88, 88, w7 ? 0xd8e8f8 : cur ? 0x9db2ec : 0x8aa5e8);
+		}
 		ui_icon(cr, icon(side[i].icon)->s32, 32, y + 6, 32);
-		draw_label(cr, "Tahoma 8", side[i].label, 48, y + 42, 86, 0xffffff, 0x000000, -1);
+		if (w7)
+			draw_label(cr, "Tahoma 8", side[i].label, 48, y + 42, 86, 0x15428b, 0xdce6f4, -1);
+		else
+			draw_label(cr, "Tahoma 8", side[i].label, 48, y + 42, 86, 0xffffff, 0x000000, -1);
 		ui_reg(w, side[i].id, 4, y, 88, 88);
 	}
 	if (s->tab == 1) {
@@ -1397,6 +1446,9 @@ static void paint_system(struct sheet *s, cairo_t *cr) {
 		ui_fill(cr, 24, 48, 160, 110, 0x5a7edc);
 		ui_icon(cr, logo, 36, 60, 137);
 		cairo_surface_destroy(logo);
+	} else {
+		ui_icon(cr, icon("computer")->s32, 64, 58, 64);
+		ui_text(cr, "Trebuchet MS, Bold 12", "Windows 7", 54, 130, 0, 0x003399);
 	}
 	int x = 206, y = 48, mw = SHEET_W - x - 24;
 	ui_text(cr, "Tahoma 8", "System:", x, y, 0, 0x000000);
@@ -1440,19 +1492,25 @@ static void paint_power(struct sheet *s, cairo_t *cr) {
 		ui_icon(cr, icon("cp-power")->s32, 30, 50, 32);
 		ui_text(cr, "Trebuchet MS, Bold 14", pct, 76, 52, 0, 0x0a246a);
 		ui_text(cr, "Tahoma 8", battery_state, 78, 80, 0, 0x000000);
-		/* XP's green block meter */
 		int p = atoi(battery_pct);
-		struct image track = {.s = theme_png(&ui_theme, "luna/progresstrack.png"), .count = 1, .m = {4, 4, 3, 3}};
-		draw_image(cr, &track, 0, 30, 110, SHEET_W - 60, 18);
-		if (track.s)
-			cairo_surface_destroy(track.s);
-		cairo_surface_t *chunk = theme_png(&ui_theme, "luna/progresschunk.png");
-		for (int x = 33; chunk && x + 8 < 30 + (SHEET_W - 66) * p / 100; x += 10) {
-			cairo_set_source_surface(cr, chunk, x, 113);
-			cairo_paint(cr);
+		if (ui_theme.version == 7 && ui_theme.w7_progress_bar.s) {
+			draw_image(cr, &ui_theme.w7_progress_bar, 0, 30, 110, SHEET_W - 60, 16);
+			if (p > 0)
+				draw_image(cr, &ui_theme.w7_progress_fill, 0, 31, 111, (SHEET_W - 62) * p / 100, 14);
+		} else {
+			/* XP's green block meter */
+			struct image track = {.s = theme_png(&ui_theme, "luna/progresstrack.png"), .count = 1, .m = {4, 4, 3, 3}};
+			draw_image(cr, &track, 0, 30, 110, SHEET_W - 60, 18);
+			if (track.s)
+				cairo_surface_destroy(track.s);
+			cairo_surface_t *chunk = theme_png(&ui_theme, "luna/progresschunk.png");
+			for (int x = 33; chunk && x + 8 < 30 + (SHEET_W - 66) * p / 100; x += 10) {
+				cairo_set_source_surface(cr, chunk, x, 113);
+				cairo_paint(cr);
+			}
+			if (chunk)
+				cairo_surface_destroy(chunk);
 		}
-		if (chunk)
-			cairo_surface_destroy(chunk);
 	}
 }
 
@@ -1506,8 +1564,13 @@ static void paint_users(struct sheet *s, cairo_t *cr) {
 	for (int i = 0; i < n_pictures; i++)
 		if (pl && !strncmp(pictures[i].value, cfg.picture, pl) && pictures[i].value[pl] == '.')
 			cur = pictures[i].img;
-	draw_image(cr, &ui_theme.user_tile, 0, 22, 40, 56, 56);
-	ui_icon(cr, cur ? cur : ui_theme.user_pic, 26, 44, 48);
+	if (ui_theme.version == 7 && ui_theme.w7_userframe) {
+		ui_icon(cr, cur ? cur : ui_theme.user_pic, 26, 44, 48);
+		ui_icon(cr, ui_theme.w7_userframe, 18, 36, 64);
+	} else {
+		draw_image(cr, &ui_theme.user_tile, 0, 22, 40, 56, 56);
+		ui_icon(cr, cur ? cur : ui_theme.user_pic, 26, 44, 48);
+	}
 	ui_text(cr, "Trebuchet MS, Bold 12", user, 90, 50, 0, 0x0a246a);
 	hint(cr, 90, 74, "Pick a new picture for your account.");
 	for (int i = 0; i < n_pictures; i++) {
@@ -1572,43 +1635,67 @@ static void task_link(struct ui_win *w, cairo_t *cr, int id, int x, int y, const
 }
 
 static void paint_cp(struct ui_win *w, cairo_t *cr) {
+	bool w7 = ui_theme.version == 7;
 	ui_fill(cr, 0, 0, w->w, w->h, 0xffffff);
-	cairo_pattern_t *g = cairo_pattern_create_linear(0, 0, 0, w->h);
-	cairo_pattern_add_color_stop_rgb(g, 0, 0x7b / 255.0, 0xa2 / 255.0, 0xe7 / 255.0);
-	cairo_pattern_add_color_stop_rgb(g, 1, 0x63 / 255.0, 0x75 / 255.0, 0xd6 / 255.0);
-	cairo_set_source(cr, g);
-	cairo_rectangle(cr, 0, 0, 200, w->h);
-	cairo_fill(cr);
-	cairo_pattern_destroy(g);
-	int bx = 12, by = 12, bw = 176;
-	g = cairo_pattern_create_linear(bx, 0, bx + bw, 0);
-	cairo_pattern_add_color_stop_rgb(g, 0, 1, 1, 1);
-	cairo_pattern_add_color_stop_rgb(g, 1, 0xc6 / 255.0, 0xd3 / 255.0, 0xf7 / 255.0);
-	cairo_set_source(cr, g);
-	cairo_rectangle(cr, bx, by, bw, 24);
-	cairo_fill(cr);
-	cairo_pattern_destroy(g);
-	ui_icon(cr, icon("control-panel")->s32, bx + 4, by + 2, 20);
-	ui_text(cr, "Tahoma Bold 8", "Control Panel", bx + 30, by + 6, 0, 0x215dc6);
-	ui_fill(cr, bx, by + 24, bw, cp_category >= 0 ? 56 : 34, 0xd6dff7);
-	task_link(w, cr, ID_VIEW_TOGGLE, bx + 8, by + 34, "cp-display", classic_view ? "Switch to Category View" : "Switch to Classic View");
-	if (cp_category >= 0)
-		task_link(w, cr, ID_HOME, bx + 8, by + 56, "control-panel", "Back to categories");
+	if (w7) {
+		/* Windows 7 Control Panel left task pane (ControlPanel.1 gradient) */
+		cairo_pattern_t *g = cairo_pattern_create_linear(0, 0, 0, w->h);
+		cairo_pattern_add_color_stop_rgb(g, 0, 220 / 255.0, 230 / 255.0, 244 / 255.0);
+		cairo_pattern_add_color_stop_rgb(g, 1, 233 / 255.0, 243 / 255.0, 255 / 255.0);
+		cairo_set_source(cr, g);
+		cairo_rectangle(cr, 0, 0, 200, w->h);
+		cairo_fill(cr);
+		cairo_pattern_destroy(g);
+		ui_fill(cr, 199, 0, 1, w->h, 0xd6e2f0);
+		ui_icon(cr, icon("control-panel")->s16, 16, 18, 16);
+		ui_text(cr, "Tahoma Bold 8", "Control Panel Home", 38, 18, 0, 0x15428b);
+		task_link(w, cr, ID_VIEW_TOGGLE, 16, 48, "cp-display", classic_view ? "Category View" : "Classic View");
+		if (cp_category >= 0)
+			task_link(w, cr, ID_HOME, 16, 74, "control-panel", "All Categories");
+	} else {
+		cairo_pattern_t *g = cairo_pattern_create_linear(0, 0, 0, w->h);
+		cairo_pattern_add_color_stop_rgb(g, 0, 0x7b / 255.0, 0xa2 / 255.0, 0xe7 / 255.0);
+		cairo_pattern_add_color_stop_rgb(g, 1, 0x63 / 255.0, 0x75 / 255.0, 0xd6 / 255.0);
+		cairo_set_source(cr, g);
+		cairo_rectangle(cr, 0, 0, 200, w->h);
+		cairo_fill(cr);
+		cairo_pattern_destroy(g);
+		int bx = 12, by = 12, bw = 176;
+		g = cairo_pattern_create_linear(bx, 0, bx + bw, 0);
+		cairo_pattern_add_color_stop_rgb(g, 0, 1, 1, 1);
+		cairo_pattern_add_color_stop_rgb(g, 1, 0xc6 / 255.0, 0xd3 / 255.0, 0xf7 / 255.0);
+		cairo_set_source(cr, g);
+		cairo_rectangle(cr, bx, by, bw, 24);
+		cairo_fill(cr);
+		cairo_pattern_destroy(g);
+		ui_icon(cr, icon("control-panel")->s32, bx + 4, by + 2, 20);
+		ui_text(cr, "Tahoma Bold 8", "Control Panel", bx + 30, by + 6, 0, 0x215dc6);
+		ui_fill(cr, bx, by + 24, bw, cp_category >= 0 ? 56 : 34, 0xd6dff7);
+		task_link(w, cr, ID_VIEW_TOGGLE, bx + 8, by + 34, "cp-display", classic_view ? "Switch to Category View" : "Switch to Classic View");
+		if (cp_category >= 0)
+			task_link(w, cr, ID_HOME, bx + 8, by + 56, "control-panel", "Back to categories");
+	}
 
 	int cx = 220;
 	if (classic_view) {
 		for (int k = K_DISPLAY; k < K_COUNT; k++) {
 			int i = k - K_DISPLAY, col = i % 4, row = i / 4, x = cx + col * 105, y = 20 + row * 100;
-			if (w->hot == ID_APPLET + k)
-				ui_fill(cr, x, y, 96, 84, 0xe8eefa);
+			if (w->hot == ID_APPLET + k) {
+				if (w7 && ui_theme.w7_list_hot.s)
+					draw_image(cr, &ui_theme.w7_list_hot, 0, x, y, 96, 84);
+				else
+					ui_fill(cr, x, y, 96, 84, 0xe8eefa);
+			}
 			ui_icon(cr, icon(applets[k].icon)->s32, x + 32, y + 6, 32);
 			draw_label(cr, "Tahoma 8", applets[k].name, x + 48, y + 44, 92, 0x000000, 0xffffff, -1);
 			ui_reg(w, ID_APPLET + k, x, y, 96, 84);
 		}
 		return;
 	}
+	uint32_t hdr_rgb = w7 ? 0x003399 : 0x4d6185;
+	uint32_t link_rgb = w7 ? 0x1b671b : 0x215dc6, link_hot = w7 ? 0x339933 : 0x428eff;
 	if (cp_category < 0) {
-		ui_text(cr, "Trebuchet MS, Bold 14", "Pick a category", cx, 24, 0, 0x4d6185);
+		ui_text(cr, "Trebuchet MS, Bold 14", w7 ? "Adjust your computer's settings" : "Pick a category", cx, 24, 0, hdr_rgb);
 		ui_fill(cr, cx, 52, w->w - cx - 20, 1, 0xd6dff7);
 		for (int c = 0; c < N_CATS; c++) {
 			int x = cx + (c % 2) * 215, y = 70 + (c / 2) * 64;
@@ -1616,7 +1703,7 @@ static void paint_cp(struct ui_win *w, cairo_t *cr) {
 			ui_icon(cr, cat_icons[c].s32, x, y, 32);
 			/* long names break onto a second line, as in XP */
 			const char *nm = categories[c].name;
-			ui_text(cr, "Tahoma 8", nm, x + 42, y + (strchr(nm, '\n') ? 2 : 9), 0, h ? 0x428eff : 0x215dc6);
+			ui_text(cr, "Tahoma 8", nm, x + 42, y + (strchr(nm, '\n') ? 2 : 9), 0, h ? link_hot : link_rgb);
 			ui_reg(w, ID_CATEGORY + c, x, y, 205, 40);
 		}
 		return;
@@ -1627,16 +1714,16 @@ static void paint_cp(struct ui_win *w, cairo_t *cr) {
 	snprintf(title, sizeof(title), "%s", cat->name);
 	for (char *nl = strchr(title, '\n'); nl; nl = strchr(nl, '\n'))
 		*nl = ' ';
-	ui_text(cr, "Trebuchet MS, Bold 14", title, cx + 42, 22, w->w - cx - 60, 0x4d6185);
+	ui_text(cr, "Trebuchet MS, Bold 14", title, cx + 42, 22, w->w - cx - 60, w7 ? 0x1b671b : hdr_rgb);
 	ui_fill(cr, cx, 56, w->w - cx - 20, 1, 0xd6dff7);
 	ui_text(cr, "Tahoma 8", cat->blurb, cx, 66, w->w - cx - 30, 0x000000);
-	ui_text(cr, "Trebuchet MS, Bold 10", "or pick a Control Panel icon", cx, 100, 0, 0x4d6185);
+	ui_text(cr, "Trebuchet MS, Bold 10", "or pick a Control Panel icon", cx, 100, 0, hdr_rgb);
 	for (int i = 0; i < 4 && cat->items[i]; i++) {
 		enum kind k = cat->items[i];
 		int x = cx + (i % 2) * 215, y = 130 + (i / 2) * 50;
 		bool h = w->hot == (int)(ID_APPLET + k);
 		ui_icon(cr, icon(applets[k].icon)->s32, x, y, 32);
-		ui_text(cr, "Tahoma 8", applets[k].name, x + 42, y + 9, 160, h ? 0x428eff : 0x215dc6);
+		ui_text(cr, "Tahoma 8", applets[k].name, x + 42, y + 9, 160, h ? link_hot : link_rgb);
 		ui_reg(w, ID_APPLET + k, x, y, 205, 36);
 	}
 }
@@ -2069,13 +2156,17 @@ static void cp_key(struct ui_win *w, xkb_keysym_t sym, const char *utf8, int mod
 		cp_category = -1;
 }
 
-int main(int argc, char **argv) {
-	if (!ui_init("expede-settings"))
-		return 1;
-	config_load();
+static void load_theme_assets(void) {
+	memset(icache, 0, sizeof(icache));
+	preview_for[0] = 0;
 	theme_set_user_picture(&ui_theme, cfg.picture);
 
 	char dir[700];
+	for (int i = 0; i < n_wallpapers; i++) {
+		free(wallpapers[i].value);
+		free(wallpapers[i].label);
+	}
+	free(wallpapers);
 	wallpapers = calloc(1, sizeof(*wallpapers));
 	wallpapers[0] = (struct choice){strdup(""), strdup("(None)"), NULL};
 	n_wallpapers = 1;
@@ -2087,6 +2178,16 @@ int main(int argc, char **argv) {
 	memcpy(wallpapers + 1, found, n_found * sizeof(*found));
 	n_wallpapers += n_found;
 	free(found);
+
+	for (int i = 0; i < n_pictures; i++) {
+		free(pictures[i].value);
+		free(pictures[i].label);
+		if (pictures[i].img)
+			cairo_surface_destroy(pictures[i].img);
+	}
+	free(pictures);
+	pictures = NULL;
+	n_pictures = 0;
 	snprintf(dir, sizeof(dir), "%s/pictures", ui_theme.dir);
 	list_dir(dir, &pictures, &n_pictures, false);
 	for (int i = 0; i < n_pictures; i++) {
@@ -2096,6 +2197,13 @@ int main(int argc, char **argv) {
 	}
 	for (int c = 0; c < N_CATS; c++)
 		cat_icons[c] = theme_icon(&ui_theme, categories[c].icon);
+}
+
+int main(int argc, char **argv) {
+	if (!ui_init("expede-settings"))
+		return 1;
+	config_load();
+	load_theme_assets();
 
 	enum kind start = K_CP;
 	for (int k = 1; argc > 1 && k < K_COUNT; k++)

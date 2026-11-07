@@ -37,8 +37,10 @@ enum place { P_DIR, P_COMPUTER, P_TRASH, P_SEARCH };
 enum {
 	ID_BACK = 1, ID_FWD, ID_UP, ID_SEARCH, ID_FOLDERS, ID_VIEWS, ID_ADDR, ID_GO, ID_CONTENT, ID_THUMB,
 	ID_SEARCH_FIELD, ID_SEARCH_GO, ID_RENAME, ID_DLG_OK, ID_DLG_CANCEL,
+	ID_ORGANIZE, ID_CMD_OPEN, ID_CMD_PROPS, ID_SYS_PROPS, ID_UNINSTALL_PROGS,
 	ID_TASK = 100,    /* + task index */
 	ID_PLACE = 200,   /* + place index */
+	ID_CRUMB = 250,   /* + breadcrumb index (0..31) */
 	ID_COL = 300,     /* + details column */
 	ID_TREE = 400,    /* + node (label) */
 	ID_TREE_EXP = 1400, /* + node (expander) */
@@ -98,6 +100,9 @@ static struct {
 	char dialog_text[1024];
 	/* search results root */
 	char search_root[PATH_MAX];
+	/* Windows 7 breadcrumbs */
+	char crumb_labels[32][128], crumb_paths[32][PATH_MAX];
+	int n_crumbs;
 } ex;
 
 /* ------------------------------------------------------------------ icons */
@@ -892,7 +897,207 @@ static void layout(void) {
 		ex.scroll = 0;
 }
 
+enum task {
+	T_NEW_FOLDER, T_RENAME, T_COPY, T_CUT, T_DELETE, T_PASTE, T_EMPTY, T_RESTORE, T_SETTINGS, T_TERMINAL,
+	T_PLACE_DESKTOP, T_PLACE_HOME, T_PLACE_COMPUTER, T_PLACE_TRASH,
+};
+
+static void build_crumbs(void) {
+	ex.n_crumbs = 0;
+	snprintf(ex.crumb_labels[0], sizeof(ex.crumb_labels[0]), "Computer");
+	snprintf(ex.crumb_paths[0], sizeof(ex.crumb_paths[0]), "computer:");
+	ex.n_crumbs = 1;
+	if (ex.place == P_COMPUTER)
+		return;
+	if (ex.place == P_TRASH) {
+		snprintf(ex.crumb_labels[1], sizeof(ex.crumb_labels[1]), "Recycle Bin");
+		snprintf(ex.crumb_paths[1], sizeof(ex.crumb_paths[1]), "trash:");
+		ex.n_crumbs = 2;
+		return;
+	}
+	if (ex.place == P_SEARCH) {
+		snprintf(ex.crumb_labels[1], sizeof(ex.crumb_labels[1]), "Search Results");
+		snprintf(ex.crumb_paths[1], sizeof(ex.crumb_paths[1]), "%s", ex.search_root);
+		ex.n_crumbs = 2;
+		return;
+	}
+	const char *h = home();
+	size_t hl = strlen(h);
+	const char *rest = ex.cur;
+	char accum[PATH_MAX];
+	if (hl > 1 && !strncmp(ex.cur, h, hl) && (ex.cur[hl] == '/' || ex.cur[hl] == 0)) {
+		snprintf(ex.crumb_labels[ex.n_crumbs], sizeof(ex.crumb_labels[0]), "%s", getenv("USER") ? getenv("USER") : "Home");
+		snprintf(ex.crumb_paths[ex.n_crumbs], sizeof(ex.crumb_paths[0]), "%s", h);
+		ex.n_crumbs++;
+		snprintf(accum, sizeof(accum), "%s", h);
+		rest = ex.cur + hl;
+	} else {
+		snprintf(ex.crumb_labels[ex.n_crumbs], sizeof(ex.crumb_labels[0]), "Local Disk (/)");
+		snprintf(ex.crumb_paths[ex.n_crumbs], sizeof(ex.crumb_paths[0]), "/");
+		ex.n_crumbs++;
+		accum[0] = 0;
+	}
+	while (*rest && ex.n_crumbs < 32) {
+		while (*rest == '/')
+			rest++;
+		if (!*rest)
+			break;
+		size_t l = strcspn(rest, "/");
+		char seg[128];
+		snprintf(seg, sizeof(seg), "%.*s", (int)(l < sizeof(seg) - 1 ? l : sizeof(seg) - 1), rest);
+		size_t al = strlen(accum);
+		snprintf(accum + al, sizeof(accum) - al, "/%s", seg);
+		snprintf(ex.crumb_labels[ex.n_crumbs], sizeof(ex.crumb_labels[0]), "%s", seg);
+		snprintf(ex.crumb_paths[ex.n_crumbs], sizeof(ex.crumb_paths[0]), "%s", accum);
+		ex.n_crumbs++;
+		rest += l;
+	}
+}
+
+static void w7_cmd_btn(struct ui_win *w, cairo_t *cr, int id, int *x, int y, const char *label, const char *ic, bool drop) {
+	int tw = text_width("Tahoma 8", label);
+	int bw = 16 + tw + (ic ? 20 : 0) + (drop ? 12 : 0);
+	int st = ui_state(w, id);
+	if (st > 0 && ui_theme.w7_cmd_btn.s)
+		draw_image(cr, &ui_theme.w7_cmd_btn, st == 2 ? 2 : 1, *x, y, bw, 25);
+	int tx = *x + 8;
+	if (ic) {
+		ui_icon(cr, icon(ic)->s16, tx, y + 4, 16);
+		tx += 20;
+	}
+	ui_text(cr, "Tahoma 8", label, tx, y + 5, 0, 0x1e395b);
+	if (drop) {
+		int ax = *x + bw - 12, ay = y + 11;
+		cairo_set_source_rgb(cr, 0.12, 0.22, 0.36);
+		cairo_move_to(cr, ax, ay);
+		cairo_line_to(cr, ax + 6, ay);
+		cairo_line_to(cr, ax + 3, ay + 3.5);
+		cairo_close_path(cr);
+		cairo_fill(cr);
+	}
+	ui_reg(w, id, *x, y, bw, 25);
+	*x += bw + 4;
+}
+
 static void paint_toolbar(struct ui_win *w, cairo_t *cr) {
+	if (ui_theme.version == 7) {
+		int nh = 35;
+		if (ui_theme.w7_nav_bg.s)
+			draw_image(cr, &ui_theme.w7_nav_bg, 0, 0, 0, w->w, nh);
+		else
+			ui_fill(cr, 0, 0, w->w, nh, 0xdbe6f4);
+		/* Round Aero Back and Forward buttons */
+		int bst = ex.n_back == 0 ? 3 : ui_state(w, ID_BACK) == 2 ? 2 : ui_state(w, ID_BACK) == 1 ? 1 : 0;
+		int fst = ex.n_fwd == 0 ? 3 : ui_state(w, ID_FWD) == 2 ? 2 : ui_state(w, ID_FWD) == 1 ? 1 : 0;
+		if (ui_theme.w7_back)
+			draw_frame_true(cr, ui_theme.w7_back, 4, bst, 4, 3);
+		if (ui_theme.w7_fwd)
+			draw_frame_true(cr, ui_theme.w7_fwd, 4, fst, 34, 3);
+		if (ex.n_back)
+			ui_reg(w, ID_BACK, 4, 3, 30, 30);
+		if (ex.n_fwd)
+			ui_reg(w, ID_FWD, 34, 3, 30, 30);
+
+		/* Breadcrumb address band */
+		int sw = 200;
+		int fx = 70, fy = 6, fw = w->w - fx - sw - 14, fh = 24;
+		if (fw < 120)
+			fw = 120;
+		int ast = ex.focus == F_ADDR ? 3 : ui_state(w, ID_ADDR) == 1 ? 1 : 0;
+		if (ui_theme.w7_addr_band.s)
+			draw_image(cr, &ui_theme.w7_addr_band, ast, fx, fy, fw, fh);
+		else {
+			ui_fill(cr, fx, fy, fw, fh, 0x8e9cad);
+			ui_fill(cr, fx + 1, fy + 1, fw - 2, fh - 2, 0xffffff);
+		}
+		const char *ic = ex.place == P_COMPUTER ? "computer" : ex.place == P_TRASH ? "recycle-empty" :
+			ex.place == P_SEARCH ? "search" : "folder";
+		ui_icon(cr, icon(ic)->s16, fx + 5, fy + 4, 16);
+
+		if (ex.focus == F_ADDR) {
+			cairo_save(cr);
+			cairo_rectangle(cr, fx + 24, fy + 2, fw - 48, fh - 4);
+			cairo_clip(cr);
+			ui_text(cr, "Tahoma 8", ex.addr, fx + 24, fy + 5, 0, 0x000000);
+			char before[PATH_MAX];
+			snprintf(before, sizeof(before), "%.*s", ex.addr_caret, ex.addr);
+			ui_fill(cr, fx + 24 + (ex.addr_caret ? text_width("Tahoma 8", before) : 0), fy + 5, 1, 14, 0x000000);
+			cairo_restore(cr);
+			ui_reg(w, ID_ADDR, fx, fy, fw - 24, fh);
+		} else {
+			build_crumbs();
+			int avail = fw - 50;
+			int first = 0;
+			for (; first < ex.n_crumbs - 1; first++) {
+				int tot = 0;
+				for (int i = first; i < ex.n_crumbs; i++)
+					tot += text_width("Tahoma 8", ex.crumb_labels[i]) + 22;
+				if (tot <= avail)
+					break;
+			}
+			int cx = fx + 23;
+			if (ui_theme.w7_crumb_sep)
+				draw_frame_true(cr, ui_theme.w7_crumb_sep, 8, 0, cx, fy + 7);
+			cx += 11;
+			for (int i = first; i < ex.n_crumbs; i++) {
+				int cid = ID_CRUMB + i;
+				int cw = text_width("Tahoma 8", ex.crumb_labels[i]) + 20;
+				if (cx + cw > fx + fw - 26 && i > first)
+					break;
+				int cst = ui_state(w, cid);
+				if (cst > 0 && ui_theme.w7_crumb_btn.s)
+					draw_image(cr, &ui_theme.w7_crumb_btn, cst == 2 ? 2 : 1, cx, fy + 1, cw, fh - 2);
+				ui_text(cr, "Tahoma 8", ex.crumb_labels[i], cx + 5, fy + 5, 0, 0x000000);
+				if (ui_theme.w7_crumb_sep)
+					draw_frame_true(cr, ui_theme.w7_crumb_sep, 8, cst > 0 ? 1 : 0, cx + cw - 11, fy + 7);
+				ui_reg(w, cid, cx, fy + 1, cw, fh - 2);
+				cx += cw;
+			}
+			/* clicking empty space in the breadcrumb bar switches to typing mode */
+			if (cx < fx + fw - 24)
+				ui_reg(w, ID_ADDR, cx, fy, fx + fw - 24 - cx, fh);
+		}
+		/* Go / Refresh button on the right edge of the address band */
+		int gx = fx + fw - 22;
+		if (ui_state(w, ID_GO) > 0 && ui_theme.w7_crumb_btn.s)
+			draw_image(cr, &ui_theme.w7_crumb_btn, ui_state(w, ID_GO) == 2 ? 2 : 1, gx, fy + 1, 21, fh - 2);
+		cairo_set_source_rgb(cr, 0.18, 0.36, 0.62);
+		cairo_set_line_width(cr, 1.5);
+		cairo_arc(cr, gx + 10.5, fy + 12, 4.5, 0.6, 5.2);
+		cairo_stroke(cr);
+		ui_reg(w, ID_GO, gx, fy, 22, fh);
+
+		/* Search box on the right */
+		int sx = fx + fw + 8;
+		int sst = ex.focus == F_SEARCH ? 3 : ui_state(w, ID_SEARCH_FIELD) == 1 ? 1 : 0;
+		if (ui_theme.w7_search_box.s)
+			draw_image(cr, &ui_theme.w7_search_box, sst, sx, fy, sw, fh);
+		else {
+			ui_fill(cr, sx, fy, sw, fh, 0x8e9cad);
+			ui_fill(cr, sx + 1, fy + 1, sw - 2, fh - 2, 0xffffff);
+		}
+		cairo_save(cr);
+		cairo_rectangle(cr, sx + 8, fy + 2, sw - 30, fh - 4);
+		cairo_clip(cr);
+		if (ex.focus == F_SEARCH || ex.query[0]) {
+			ui_text(cr, "Tahoma 8", ex.query, sx + 8, fy + 5, 0, 0x000000);
+			if (ex.focus == F_SEARCH) {
+				char before[256];
+				snprintf(before, sizeof(before), "%.*s", ex.query_caret, ex.query);
+				ui_fill(cr, sx + 8 + (ex.query_caret ? text_width("Tahoma 8", before) : 0), fy + 5, 1, 14, 0x000000);
+			}
+		} else {
+			char ph[320], nm[256];
+			display_name(ex.cur, ex.place, nm, sizeof(nm));
+			snprintf(ph, sizeof(ph), "Search %s", nm);
+			ui_text(cr, "Segoe UI Italic 9", ph, sx + 8, fy + 5, sw - 32, 0x6d6d6d);
+		}
+		cairo_restore(cr);
+		ui_icon(cr, icon("search")->s16, sx + sw - 21, fy + 4, 16);
+		ui_reg(w, ID_SEARCH_FIELD, sx, fy, sw - 24, fh);
+		ui_reg(w, ID_SEARCH_GO, sx + sw - 24, fy, 24, fh);
+		return;
+	}
 	/* the rebar: Luna's toolbar background, a shade of the dialog colour */
 	draw_image(cr, &(struct image){.s = theme_png(&ui_theme, "luna/toolbarbackground.png"), .count = 1}, 0, 0, 0, w->w, TB_H);
 	struct { int id, icon; const char *label; bool disabled; } b[] = {
@@ -940,6 +1145,49 @@ static void paint_toolbar(struct ui_win *w, cairo_t *cr) {
 }
 
 static void paint_address(struct ui_win *w, cairo_t *cr) {
+	if (ui_theme.version == 7) {
+		/* Windows 7 Aero Command Bar (35..64) */
+		int y = 35, ch = TB_H + AB_H - y;
+		if (ui_theme.w7_cmd_bar.s)
+			draw_image(cr, &ui_theme.w7_cmd_bar, 0, 0, y, w->w, ch);
+		else {
+			ui_fill(cr, 0, y, w->w, ch, 0xf5f9fd);
+			ui_fill(cr, 0, y + ch - 1, w->w, 1, 0xd6e2f0);
+		}
+		int x = 8, by = y + 2;
+		w7_cmd_btn(w, cr, ID_ORGANIZE, &x, by, "Organize", NULL, true);
+		int sel = n_selected();
+		if (ex.place == P_TRASH) {
+			w7_cmd_btn(w, cr, ID_TASK + T_EMPTY, &x, by, "Empty the Recycle Bin", "recycle-empty", false);
+			if (sel)
+				w7_cmd_btn(w, cr, ID_TASK + T_RESTORE, &x, by, sel > 1 ? "Restore the selected items" : "Restore this item", NULL, false);
+		} else if (ex.place == P_COMPUTER) {
+			w7_cmd_btn(w, cr, ID_SYS_PROPS, &x, by, "System properties", NULL, false);
+			w7_cmd_btn(w, cr, ID_UNINSTALL_PROGS, &x, by, "Uninstall or change a program", NULL, false);
+			w7_cmd_btn(w, cr, ID_TASK + T_SETTINGS, &x, by, "Open Control Panel", "control-panel", false);
+		} else {
+			if (sel > 0) {
+				w7_cmd_btn(w, cr, ID_CMD_OPEN, &x, by, "Open", NULL, false);
+				w7_cmd_btn(w, cr, ID_TASK + T_COPY, &x, by, "Copy", NULL, false);
+				if (sel == 1 && ex.place == P_DIR)
+					w7_cmd_btn(w, cr, ID_TASK + T_RENAME, &x, by, "Rename", NULL, false);
+				w7_cmd_btn(w, cr, ID_TASK + T_DELETE, &x, by, "Delete", NULL, false);
+			}
+			if (ex.place == P_DIR) {
+				if (ex.n_clip)
+					w7_cmd_btn(w, cr, ID_TASK + T_PASTE, &x, by, "Paste", NULL, false);
+				w7_cmd_btn(w, cr, ID_TASK + T_NEW_FOLDER, &x, by, "New folder", "folder", false);
+			}
+		}
+		/* Right-aligned Views and Help/Properties buttons */
+		int rx = w->w - 108;
+		if (rx > x) {
+			static const char *vnames[] = {"Tiles", "Icons", "List", "Details"};
+			w7_cmd_btn(w, cr, ID_VIEWS, &rx, by, vnames[ex.view], NULL, true);
+			w7_cmd_btn(w, cr, ID_CMD_PROPS, &rx, by, "?", "help", false);
+		}
+		return;
+	}
 	int y = TB_H;
 	ui_fill(cr, 0, y, w->w, AB_H, 0xefedde);
 	ui_text(cr, "Tahoma 8", "Address", 8, y + 6, 0, 0x6d6b5f);
@@ -1012,11 +1260,6 @@ static int box_body(cairo_t *cr, int y0, int y1, uint32_t bg) {
 	ui_fill(cr, 12, y1 - 1, PANE_W - 24, 1, 0xffffff);
 	return y1 + 12;
 }
-
-enum task {
-	T_NEW_FOLDER, T_RENAME, T_COPY, T_CUT, T_DELETE, T_PASTE, T_EMPTY, T_RESTORE, T_SETTINGS, T_TERMINAL,
-	T_PLACE_DESKTOP, T_PLACE_HOME, T_PLACE_COMPUTER, T_PLACE_TRASH,
-};
 
 static void paint_tasks(struct ui_win *w, cairo_t *cr, int top) {
 	int y = top + 12;
@@ -1110,7 +1353,107 @@ static void paint_tasks(struct ui_win *w, cairo_t *cr, int top) {
 	ui_text(cr, "Tahoma 8", line3, 22, by + 32, PANE_W - 44, 0x000000);
 }
 
+static void paint_nav7_item(struct ui_win *w, cairo_t *cr, int id, int *y, int indent, const char *ic, const char *label, bool cur) {
+	int ry = *y;
+	bool hot = w->hot == id;
+	if (cur || hot) {
+		struct image *hi = cur && hot && ui_theme.w7_list_hot_sel.s ? &ui_theme.w7_list_hot_sel :
+			cur ? &ui_theme.w7_list_sel : &ui_theme.w7_list_hot;
+		if (hi->s)
+			draw_image(cr, hi, 0, 4, ry, PANE_W - 10, 20);
+		else
+			ui_fill(cr, 4, ry, PANE_W - 10, 20, cur ? 0xd9ebf9 : 0xeef6fd);
+	}
+	ui_icon(cr, icon(ic)->s16, 10 + indent, ry + 2, 16);
+	ui_text(cr, "Tahoma 8", label, 30 + indent, ry + 3, PANE_W - 38 - indent, 0x000000);
+	ui_reg(w, id, 4, ry, PANE_W - 10, 20);
+	*y += 20;
+}
+
+static void paint_nav7(struct ui_win *w, cairo_t *cr, int top, int bottom) {
+	ui_fill(cr, 0, top, PANE_W, bottom - top, 0xffffff);
+	cairo_save(cr);
+	cairo_rectangle(cr, 0, top, PANE_W - 1, bottom - top);
+	cairo_clip(cr);
+	int y = top + 6 - ex.tree_scroll;
+	const char *h = home();
+	char p[PATH_MAX];
+
+	/* Favorites */
+	ui_icon(cr, icon("favorites")->s16 ? icon("favorites")->s16 : icon("folder")->s16, 10, y + 2, 16);
+	ui_text(cr, "Tahoma Bold 8", "Favorites", 30, y + 3, 0, 0x1e395b);
+	y += 22;
+	snprintf(p, sizeof(p), "%s/Desktop", h);
+	if (access(p, F_OK) == 0)
+		paint_nav7_item(w, cr, ID_TASK + T_PLACE_DESKTOP, &y, 12, "cp-display", "Desktop", ex.place == P_DIR && !strcmp(ex.cur, p));
+	snprintf(p, sizeof(p), "%s/Downloads", h);
+	if (access(p, F_OK) == 0)
+		paint_nav7_item(w, cr, ID_PLACE + 0, &y, 12, "downloads", "Downloads", ex.place == P_DIR && !strcmp(ex.cur, p));
+	paint_nav7_item(w, cr, ID_TASK + T_PLACE_HOME, &y, 12, "my-documents", getenv("USER") ? getenv("USER") : "Home",
+		ex.place == P_DIR && !strcmp(ex.cur, h));
+
+	/* Libraries */
+	y += 6;
+	ui_icon(cr, icon("my-documents")->s16, 10, y + 2, 16);
+	ui_text(cr, "Tahoma Bold 8", "Libraries", 30, y + 3, 0, 0x1e395b);
+	y += 22;
+	static const struct { const char *sub, *ic, *lbl; int id; } libs[] = {
+		{"Documents", "my-documents", "Documents", ID_PLACE + 1},
+		{"Pictures", "my-pictures", "Pictures", ID_PLACE + 2},
+		{"Music", "my-music", "Music", ID_PLACE + 3},
+	};
+	for (int i = 0; i < 3; i++) {
+		snprintf(p, sizeof(p), "%s/%s", h, libs[i].sub);
+		if (access(p, F_OK) == 0)
+			paint_nav7_item(w, cr, libs[i].id, &y, 12, libs[i].ic, libs[i].lbl, ex.place == P_DIR && !strcmp(ex.cur, p));
+	}
+
+	/* Computer + Folder Tree */
+	y += 6;
+	paint_nav7_item(w, cr, ID_TASK + T_PLACE_COMPUTER, &y, 0, "computer", "Computer", ex.place == P_COMPUTER);
+	bool in_root = false;
+	for (int i = 0; i < ex.n_nodes; i++) {
+		struct node *nd = &ex.nodes[i];
+		if (nd->depth == 0)
+			in_root = !strcmp(nd->path, "/");
+		if (!in_root)
+			continue;
+		int x = 14 + nd->depth * 14;
+		if (y >= top - 20 && y <= bottom) {
+			bool cur = ex.place == P_DIR && !strcmp(nd->path, ex.cur);
+			bool hot = w->hot == ID_TREE + i;
+			if (cur || hot) {
+				struct image *hi = cur && hot && ui_theme.w7_list_hot_sel.s ? &ui_theme.w7_list_hot_sel :
+					cur ? &ui_theme.w7_list_sel : &ui_theme.w7_list_hot;
+				if (hi->s)
+					draw_image(cr, hi, 0, 4, y, PANE_W - 10, 20);
+				else
+					ui_fill(cr, 4, y, PANE_W - 10, 20, cur ? 0xd9ebf9 : 0xeef6fd);
+			}
+			if (nd->has_children) {
+				cairo_surface_t *gl = w->hot == ID_TREE_EXP + i && ui_theme.w7_tree_glyph_hot ?
+					ui_theme.w7_tree_glyph_hot : ui_theme.w7_tree_glyph;
+				if (gl)
+					draw_frame_true(cr, gl, 2, nd->expanded ? 1 : 0, x, y + 2);
+				ui_reg(w, ID_TREE_EXP + i, x - 2, y, 16, 20);
+			}
+			ui_icon(cr, icon(nd->icon)->s16, x + 16, y + 2, 16);
+			ui_text(cr, "Tahoma 8", nd->label, x + 36, y + 3, PANE_W - x - 42, 0x000000);
+			ui_reg(w, ID_TREE + i, x + 16, y, PANE_W - x - 22, 20);
+		}
+		y += 20;
+	}
+	y += 4;
+	paint_nav7_item(w, cr, ID_TASK + T_PLACE_TRASH, &y, 0, "recycle-empty", "Recycle Bin", ex.place == P_TRASH);
+	cairo_restore(cr);
+	ui_fill(cr, PANE_W - 1, top, 1, bottom - top, 0xd6e5f5);
+}
+
 static void paint_tree(struct ui_win *w, cairo_t *cr, int top, int bottom) {
+	if (ui_theme.version == 7) {
+		paint_nav7(w, cr, top, bottom);
+		return;
+	}
 	ui_fill(cr, 0, top, PANE_W, bottom - top, 0xffffff);
 	ui_fill(cr, 0, top, PANE_W, 22, 0xece9d8);
 	ui_text(cr, "Tahoma 8", "Folders", 8, top + 5, 0, 0x000000);
@@ -1161,9 +1504,19 @@ static void paint_item(struct ui_win *w, cairo_t *cr, int i, int ox, int oy) {
 	struct entry *e = &ex.e[i];
 	struct ui_rect b = e->box;
 	int x = ox + b.x, y = oy + b.y;
-	bool sel = e->selected, renaming = ex.focus == F_RENAME && ex.rename_index == i;
+	bool sel = e->selected, hot = w->hot == ID_ITEM + i, renaming = ex.focus == F_RENAME && ex.rename_index == i;
+	bool w7 = ui_theme.version == 7;
 	struct icon_cache *ic = icon(e->icon);
 	uint32_t hl = 0x316ac5;
+	if (w7 && (sel || hot) && !renaming) {
+		struct image *hi = sel && hot && ui_theme.w7_list_hot_sel.s ? &ui_theme.w7_list_hot_sel :
+			sel ? &ui_theme.w7_list_sel : &ui_theme.w7_list_hot;
+		int hw = ex.view == V_DETAILS ? b.w - 4 : b.w;
+		if (hi->s)
+			draw_image(cr, hi, 0, x, y, hw, b.h);
+		else
+			ui_fill(cr, x, y, hw, b.h, sel ? 0xd9ebf9 : 0xeef6fd);
+	}
 	switch (ex.view) {
 	case V_TILES: {
 		ui_icon(cr, ic->s48, x + 4, y + 5, 48);
@@ -1180,12 +1533,23 @@ static void paint_item(struct ui_win *w, cairo_t *cr, int i, int ox, int oy) {
 		int tx = x + 60, tw = text_width("Tahoma 8", e->name);
 		if (tw > b.w - 64)
 			tw = b.w - 64;
-		if (sel && !renaming)
+		if (!w7 && sel && !renaming)
 			ui_fill(cr, tx - 2, y + 9, tw + 4, 15, hl);
 		if (!renaming)
-			ui_text(cr, "Tahoma 8", e->name, tx, y + 10, b.w - 64, sel ? 0xffffff : 0x000000);
-		ui_text(cr, "Tahoma 8", l2, tx, y + 25, b.w - 64, 0x808080);
-		ui_text(cr, "Tahoma 8", l3, tx, y + 39, b.w - 64, 0x808080);
+			ui_text(cr, "Tahoma 8", e->name, tx, y + (w7 && e->total ? 4 : 10), b.w - 64, !w7 && sel ? 0xffffff : 0x000000);
+		if (w7 && e->total > 0 && ui_theme.w7_progress_bar.s) {
+			/* Windows 7 drive capacity bar */
+			int bw = b.w - 68;
+			unsigned long long used = e->total > e->avail ? e->total - e->avail : 0;
+			int fw = (int)((double)used / (double)e->total * (bw - 2));
+			draw_image(cr, &ui_theme.w7_progress_bar, 0, tx, y + 21, bw, 15);
+			if (fw > 0)
+				draw_image(cr, &ui_theme.w7_progress_fill, 0, tx + 1, y + 22, fw, 13);
+			ui_text(cr, "Tahoma 8", l3, tx, y + 38, b.w - 64, 0x5a5a5a);
+		} else {
+			ui_text(cr, "Tahoma 8", l2, tx, y + 25, b.w - 64, 0x808080);
+			ui_text(cr, "Tahoma 8", l3, tx, y + 39, b.w - 64, 0x808080);
+		}
 		if (renaming)
 			ui_field(w, cr, ID_RENAME, tx - 3, y + 7, b.w - 60, 19, ex.rename, true, ex.rename_caret);
 		break;
@@ -1194,6 +1558,8 @@ static void paint_item(struct ui_win *w, cairo_t *cr, int i, int ox, int oy) {
 		ui_icon(cr, ic->s32, x + (b.w - 32) / 2, y + 4, 32);
 		if (renaming)
 			ui_field(w, cr, ID_RENAME, x - 6, y + 40, b.w + 12, 19, ex.rename, true, ex.rename_caret);
+		else if (w7)
+			draw_label(cr, "Tahoma 8", e->name, x + b.w / 2.0, y + 41, b.w - 2, 0x000000, 0xffffff, -1);
 		else
 			draw_label(cr, "Tahoma 8", e->name, x + b.w / 2.0, y + 41, b.w - 2, sel ? 0xffffff : 0x000000, 0xffffff, sel ? (int64_t)hl : -1);
 		break;
@@ -1204,12 +1570,12 @@ static void paint_item(struct ui_win *w, cairo_t *cr, int i, int ox, int oy) {
 		int tw = text_width("Tahoma 8", e->name);
 		if (tw > nw)
 			tw = nw;
-		if (sel && !renaming)
+		if (!w7 && sel && !renaming)
 			ui_fill(cr, x + 23, y + 1, tw + 4, 16, hl);
 		if (renaming)
 			ui_field(w, cr, ID_RENAME, x + 22, y, nw, 18, ex.rename, true, ex.rename_caret);
 		else
-			ui_text(cr, "Tahoma 8", e->name, x + 25, y + 2, nw, sel ? 0xffffff : 0x000000);
+			ui_text(cr, "Tahoma 8", e->name, x + 25, y + 2, nw, !w7 && sel ? 0xffffff : 0x000000);
 		if (ex.view == V_DETAILS) {
 			char sz[32] = "", when[48];
 			if (e->total)
@@ -1218,18 +1584,19 @@ static void paint_item(struct ui_win *w, cairo_t *cr, int i, int ox, int oy) {
 				human_size(e->size, sz, sizeof(sz));
 			strftime(when, sizeof(when), "%d/%m/%Y %H:%M", localtime(&e->mtime));
 			int sw = text_width("Tahoma 8", sz);
-			ui_text(cr, "Tahoma 8", sz, x + 290 + 80 - sw - 6, y + 2, 0, 0x000000);
-			ui_text(cr, "Tahoma 8", e->type, x + 378, y + 2, 140, 0x000000);
+			ui_text(cr, "Tahoma 8", sz, x + 290 + 80 - sw - 6, y + 2, 0, w7 ? 0x5a5a5a : 0x000000);
+			ui_text(cr, "Tahoma 8", e->type, x + 378, y + 2, 140, w7 ? 0x5a5a5a : 0x000000);
 			ui_text(cr, "Tahoma 8", ex.place == P_SEARCH ? e->path : when, x + 526, y + 2,
-				ex.place == P_SEARCH ? 400 : 140, 0x000000);
+				ex.place == P_SEARCH ? 400 : 140, w7 ? 0x5a5a5a : 0x000000);
 		}
 		break;
 	}
 	}
-	ui_reg(w, ID_ITEM + i, x, y, ex.view == V_DETAILS ? 290 : b.w, b.h);
+	ui_reg(w, ID_ITEM + i, x, y, ex.view == V_DETAILS && !w7 ? 290 : b.w, b.h);
 }
 
 static void paint_content(struct ui_win *w, cairo_t *cr) {
+	bool w7 = ui_theme.version == 7;
 	struct ui_rect c = content_box();
 	layout();
 	ui_fill(cr, c.x, c.y, c.w, c.h, 0xffffff);
@@ -1239,19 +1606,19 @@ static void paint_content(struct ui_win *w, cairo_t *cr) {
 	cairo_clip(cr);
 	int ox = c.x, oy = c.y - ex.scroll;
 	if (ex.view == V_DETAILS) {
-		/* column headers: Luna's list view header bitmap */
+		/* column headers */
 		static const char *cols[] = {"Name", "Size", "Type", "Date Modified"};
 		int cx[] = {0, 290, 370, 518, 666}, hy = c.y;
-		struct image hdr = {.s = theme_png(&ui_theme, "luna/listviewheader.png"), .count = 5, .vertical = true,
-			.m = {8, 8, 3, 4}};
+		struct image hdr = w7 && ui_theme.w7_header.s ? ui_theme.w7_header :
+			(struct image){.s = theme_png(&ui_theme, "luna/listviewheader.png"), .count = 5, .vertical = true, .m = {8, 8, 3, 4}};
 		for (int k = 0; k < 4; k++) {
 			int cw = cx[k + 1] - cx[k];
 			draw_image(cr, &hdr, ui_state(w, ID_COL + k) == 2 ? 2 : ui_state(w, ID_COL + k), ox + cx[k], hy, cw, 22);
 			const char *label = k == 3 && ex.place == P_SEARCH ? "In Folder" : cols[k];
-			ui_text(cr, "Tahoma 8", label, ox + cx[k] + 6, hy + 4, cw - 12, 0x000000);
+			ui_text(cr, "Tahoma 8", label, ox + cx[k] + 6, hy + 4, cw - 12, w7 ? 0x4c607a : 0x000000);
 			if (ex.sort_col == k) {
 				int ax = ox + cx[k + 1] - 14;
-				cairo_set_source_rgb(cr, 0.55, 0.55, 0.5);
+				cairo_set_source_rgb(cr, 0.45, 0.52, 0.62);
 				cairo_move_to(cr, ax, ex.sort_desc ? 9 + hy : 13 + hy);
 				cairo_line_to(cr, ax + 7, ex.sort_desc ? 9 + hy : 13 + hy);
 				cairo_line_to(cr, ax + 3.5, ex.sort_desc ? 13 + hy : 9 + hy);
@@ -1260,7 +1627,7 @@ static void paint_content(struct ui_win *w, cairo_t *cr) {
 			}
 			ui_reg(w, ID_COL + k, ox + cx[k], hy, cw, 22);
 		}
-		if (hdr.s)
+		if (!w7 && hdr.s)
 			cairo_surface_destroy(hdr.s);
 		cairo_rectangle(cr, c.x, c.y + 22, c.w - SB_W, c.h - 22);
 		cairo_clip(cr);
@@ -1272,35 +1639,79 @@ static void paint_content(struct ui_win *w, cairo_t *cr) {
 		paint_item(w, cr, i, ox, oy);
 	}
 	if (!ex.n) {
-		const char *msg = ex.place == P_SEARCH ? "Search is complete. There are no results to display." :
+		const char *msg = ex.place == P_SEARCH ? "No items match your search." :
 			ex.place == P_TRASH ? "The Recycle Bin is empty." : "This folder is empty.";
 		ui_text(cr, "Tahoma 8", msg, c.x + 20, c.y + (ex.view == V_DETAILS ? 34 : 14), c.w - 40, 0x808080);
 	}
 	cairo_restore(cr);
 
-	/* Luna scroll bar */
+	/* Scroll bar */
 	int sx = c.x + c.w - SB_W;
-	struct image shaft = {.s = theme_png(&ui_theme, "luna/scrollshaftvertical.png"), .count = 4, .vertical = true};
-	draw_image(cr, &shaft, 0, sx, c.y, SB_W, c.h);
-	if (shaft.s)
-		cairo_surface_destroy(shaft.s);
+	if (w7 && ui_theme.w7_scroll_track.s) {
+		draw_image(cr, &ui_theme.w7_scroll_track, 0, sx, c.y, SB_W, c.h);
+	} else {
+		struct image shaft = {.s = theme_png(&ui_theme, "luna/scrollshaftvertical.png"), .count = 4, .vertical = true};
+		draw_image(cr, &shaft, 0, sx, c.y, SB_W, c.h);
+		if (shaft.s)
+			cairo_surface_destroy(shaft.s);
+	}
 	if (ex.content_h > c.h) {
 		double frac = (double)c.h / ex.content_h;
 		int th = (int)(c.h * frac);
 		if (th < 20)
 			th = 20;
 		int ty = c.y + (int)((double)ex.scroll / (ex.content_h - c.h) * (c.h - th));
-		struct image thumb = {.s = theme_png(&ui_theme, "luna/scrollthumbvertical.png"), .count = 4, .vertical = true,
-			.m = {8, 8, 3, 4}};
-		draw_image(cr, &thumb, ex.dragging_thumb ? 2 : ui_state(w, ID_THUMB), sx, ty, SB_W, th);
-		if (thumb.s)
-			cairo_surface_destroy(thumb.s);
+		int tst = ex.dragging_thumb ? 2 : ui_state(w, ID_THUMB);
+		if (w7 && ui_theme.w7_scroll_thumb.s) {
+			draw_image(cr, &ui_theme.w7_scroll_thumb, tst, sx, ty, SB_W, th);
+			if (th >= 24 && ui_theme.w7_scroll_grip)
+				draw_frame_true(cr, ui_theme.w7_scroll_grip, 4, tst, sx + (SB_W - 7) / 2, ty + (th - 11) / 2);
+		} else {
+			struct image thumb = {.s = theme_png(&ui_theme, "luna/scrollthumbvertical.png"), .count = 4, .vertical = true,
+				.m = {8, 8, 3, 4}};
+			draw_image(cr, &thumb, tst, sx, ty, SB_W, th);
+			if (thumb.s)
+				cairo_surface_destroy(thumb.s);
+		}
 		ui_reg(w, ID_THUMB, sx, ty, SB_W, th);
 	}
 }
 
 static void paint_status(struct ui_win *w, cairo_t *cr) {
 	int y = w->h - STATUS_H;
+	if (ui_theme.version == 7) {
+		if (ui_theme.w7_details_bg.s)
+			draw_image(cr, &ui_theme.w7_details_bg, 0, 0, y, w->w, STATUS_H);
+		else
+			ui_fill(cr, 0, y, w->w, STATUS_H, 0xf1f5fb);
+		ui_fill(cr, 0, y, w->w, 1, 0xd6e5f5);
+		char s[256];
+		int sel = n_selected();
+		if (sel == 1) {
+			struct entry *e = &ex.e[first_selected()];
+			ui_icon(cr, icon(e->icon)->s16, 10, y + 3, 16);
+			if (e->total) {
+				char fr[32], tot[32];
+				human_size(e->avail, fr, sizeof(fr));
+				human_size(e->total, tot, sizeof(tot));
+				snprintf(s, sizeof(s), "%s   —   %s   (%s free of %s)", e->name, e->type, fr, tot);
+			} else if (!e->dir) {
+				char sz[32];
+				human_size(e->size, sz, sizeof(sz));
+				snprintf(s, sizeof(s), "%s   —   %s   (%s)", e->name, e->type, sz);
+			} else {
+				snprintf(s, sizeof(s), "%s   —   %s", e->name, e->type);
+			}
+			ui_text(cr, "Tahoma 8", s, 32, y + 4, w->w - 40, 0x1e395b);
+		} else if (sel > 1) {
+			snprintf(s, sizeof(s), "%d items selected", sel);
+			ui_text(cr, "Tahoma 8", s, 12, y + 4, w->w - 24, 0x1e395b);
+		} else {
+			snprintf(s, sizeof(s), "%d item%s", ex.n, ex.n == 1 ? "" : "s");
+			ui_text(cr, "Tahoma 8", s, 12, y + 4, w->w - 24, 0x1e395b);
+		}
+		return;
+	}
 	struct image bg = {.s = theme_png(&ui_theme, "luna/statusbackground.png"), .count = 1};
 	draw_image(cr, &bg, 0, 0, y, w->w, STATUS_H);
 	if (bg.s)
@@ -1382,20 +1793,29 @@ static void paint_dialog(struct ui_win *w, cairo_t *cr) {
 	int dw = 360, dh = ex.dialog == D_PROPERTIES ? 220 : 140;
 	int x = (w->w - dw) / 2, y = (w->h - dh) / 2;
 	ui_reg(w, ID_DLG_CANCEL - 100, 0, 0, w->w, w->h); /* modal: swallow clicks elsewhere */
-	/* a Luna dialog: blue caption strip, face colour body */
-	draw_image(cr, &ui_theme.caption, 0, x - 4, y - 26, dw + 8, 30);
 	const char *title = ex.dialog == D_PROPERTIES ? "Properties" : ex.dialog == D_ERROR ? "Error" : "Confirm Delete";
-	draw_text(cr, "Trebuchet MS, Bold 10", title, x + 4, y - 20, 0, 0xffffff, 1, 1, 0x0a1883, false);
-	ui_fill(cr, x - 4, y + 4, dw + 8, dh, 0x0831d9);
-	ui_fill(cr, x, y + 4, dw, dh - 4, 0xece9d8);
+	if (ui_theme.version == 7) {
+		ui_fill(cr, x - 4, y - 28, dw + 8, dh + 32, 0x556677);
+		ui_fill(cr, x - 3, y - 27, dw + 6, 30, 0xd8e6f6);
+		ui_text(cr, "Segoe UI 9", title, x + 6, y - 20, 0, 0x000000);
+		ui_fill(cr, x - 3, y + 3, dw + 6, dh - 44, 0xffffff);
+		ui_fill(cr, x - 3, y + dh - 41, dw + 6, 1, 0xdfdfdf);
+		ui_fill(cr, x - 3, y + dh - 40, dw + 6, 43, 0xf0f0f0);
+	} else {
+		/* a Luna dialog: blue caption strip, face colour body */
+		draw_image(cr, &ui_theme.caption, 0, x - 4, y - 26, dw + 8, 30);
+		draw_text(cr, "Trebuchet MS, Bold 10", title, x + 4, y - 20, 0, 0xffffff, 1, 1, 0x0a1883, false);
+		ui_fill(cr, x - 4, y + 4, dw + 8, dh, 0x0831d9);
+		ui_fill(cr, x, y + 4, dw, dh - 4, 0xece9d8);
+	}
 	const char *ic = ex.dialog == D_PROPERTIES ? "properties" : ex.dialog == D_ERROR ? "help" : "recycle-full";
 	ui_icon(cr, icon(ic)->s32, x + 16, y + 20, 32);
 	ui_text(cr, "Tahoma 8", ex.dialog_text, x + 64, y + 22, dw - 80, 0x000000);
 	if (ex.dialog == D_DELETE_FOREVER || ex.dialog == D_EMPTY_TRASH) {
-		ui_button(w, cr, ID_DLG_OK, x + dw - 170, y + dh - 34, 75, "Yes", false, true);
-		ui_button(w, cr, ID_DLG_CANCEL, x + dw - 88, y + dh - 34, 75, "No", false, false);
+		ui_button(w, cr, ID_DLG_OK, x + dw - 170, y + dh - 32, 75, "Yes", false, true);
+		ui_button(w, cr, ID_DLG_CANCEL, x + dw - 88, y + dh - 32, 75, "No", false, false);
 	} else {
-		ui_button(w, cr, ID_DLG_OK, x + dw - 88, y + dh - 34, 75, "OK", false, true);
+		ui_button(w, cr, ID_DLG_OK, x + dw - 88, y + dh - 32, 75, "OK", false, true);
 	}
 }
 
@@ -1403,7 +1823,9 @@ static void paint(struct ui_win *w, cairo_t *cr) {
 	paint_toolbar(w, cr);
 	paint_address(w, cr);
 	int top = TB_H + AB_H, bottom = w->h - STATUS_H;
-	if (ex.search_mode) {
+	if (ui_theme.version == 7) {
+		paint_nav7(w, cr, top, bottom);
+	} else if (ex.search_mode) {
 		paint_search_pane(w, cr, top, bottom);
 	} else if (ex.tree_mode) {
 		paint_tree(w, cr, top, bottom);
@@ -1603,7 +2025,16 @@ static void on_button(struct ui_win *w, int id, int button, bool pressed, double
 		return;
 	if (id >= ID_TASK && id < ID_TASK + 100)
 		run_task(id - ID_TASK);
-	else if (id >= ID_TREE_EXP && id < ID_TREE_EXP + ex.n_nodes)
+	else if (id >= ID_PLACE && id < ID_PLACE + 4) {
+		static const char *subs[] = {"Downloads", "Documents", "Pictures", "Music"};
+		char p[PATH_MAX];
+		snprintf(p, sizeof(p), "%s/%s", home(), subs[id - ID_PLACE]);
+		go(p, true);
+	} else if (id >= ID_CRUMB && id < ID_CRUMB + ex.n_crumbs) {
+		char p[PATH_MAX];
+		snprintf(p, sizeof(p), "%s", ex.crumb_paths[id - ID_CRUMB]);
+		go(p, true);
+	} else if (id >= ID_TREE_EXP && id < ID_TREE_EXP + ex.n_nodes)
 		tree_toggle(id - ID_TREE_EXP);
 	else if (id >= ID_TREE && id < ID_TREE + ex.n_nodes) {
 		char *p = strdup(ex.nodes[id - ID_TREE].path);
@@ -1619,11 +2050,29 @@ static void on_button(struct ui_win *w, int id, int button, bool pressed, double
 	case ID_BACK: go_back(); break;
 	case ID_FWD: go_fwd(); break;
 	case ID_UP: go_up(); break;
+	case ID_ORGANIZE:
+		ex.menu = n_selected() > 0 ? M_ITEM : M_BACKGROUND;
+		ex.menu_x = 8;
+		ex.menu_y = TB_H + AB_H - 2;
+		break;
+	case ID_CMD_OPEN: {
+		int i = first_selected();
+		if (i >= 0)
+			open_entry(&ex.e[i]);
+		break;
+	}
+	case ID_CMD_PROPS: properties(); break;
+	case ID_SYS_PROPS: spawn("expede-settings system"); break;
+	case ID_UNINSTALL_PROGS: spawn("expede-settings programs"); break;
 	case ID_GO: {
+		if (ui_theme.version == 7 && ex.focus != F_ADDR) {
+			reload();
+			break;
+		}
 		char a[PATH_MAX];
 		snprintf(a, sizeof(a), "%s", ex.addr);
 		ex.focus = F_NONE;
-		go(!strcmp(a, "My Computer") ? "computer:" : !strcmp(a, "Recycle Bin") ? "trash:" : a, true);
+		go(!strcmp(a, "My Computer") || !strcmp(a, "Computer") ? "computer:" : !strcmp(a, "Recycle Bin") ? "trash:" : a, true);
 		break;
 	}
 	case ID_SEARCH:
@@ -1641,7 +2090,7 @@ static void on_button(struct ui_win *w, int id, int button, bool pressed, double
 	case ID_VIEWS:
 		ex.menu = M_VIEWS;
 		ex.menu_x = x - 20;
-		ex.menu_y = TB_H - 2;
+		ex.menu_y = ui_theme.version == 7 ? TB_H + AB_H - 2 : TB_H - 2;
 		break;
 	case ID_SEARCH_GO:
 		if (ex.query[0]) {
@@ -1653,7 +2102,8 @@ static void on_button(struct ui_win *w, int id, int button, bool pressed, double
 			ex.view = V_DETAILS;
 			ex.focus = F_NONE;
 			reload();
-			ex.search_mode = true;
+			if (ui_theme.version != 7)
+				ex.search_mode = true;
 		}
 		break;
 	}
@@ -1673,7 +2123,7 @@ static void on_motion(struct ui_win *w, double x, double y, bool held) {
 }
 
 static void on_scroll(struct ui_win *w, double dy, double x, double y) {
-	if (ex.tree_mode && x < PANE_W) {
+	if ((ex.tree_mode || ui_theme.version == 7) && x < PANE_W) {
 		ex.tree_scroll += dy > 0 ? 54 : -54;
 		if (ex.tree_scroll < 0)
 			ex.tree_scroll = 0;

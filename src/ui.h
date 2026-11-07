@@ -36,6 +36,7 @@ struct ui_win {
 extern struct theme ui_theme;
 
 bool ui_init(const char *who);
+void ui_reload_theme(void);
 struct ui_win *ui_window(const char *title, const char *app_id, int w, int h, bool resizable);
 void ui_set_title(struct ui_win *w, const char *title);
 void ui_destroy(struct ui_win *w);

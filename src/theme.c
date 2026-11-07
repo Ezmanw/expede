@@ -517,6 +517,30 @@ static void load_w7(struct theme *t) {
 	load_image(t, &t->w7_sp_shutdown, "StartPanelPriv.23");
 	load_image(t, &t->w7_sp_shutdown_arrow, "StartPanelPriv.24");
 	load_image(t, &t->w7_sp_progs, "StartPanelPriv.12");
+	load_image(t, &t->slider_thumb_h, "TrackBar.ThumbBottom");
+	load_image(t, &t->w7_edit, "Edit.EditBorderNoScroll");
+	load_image(t, &t->w7_menu_item, "Menu.PopupItem");
+	load_image(t, &t->w7_list_hot, "Explorer::ListView.ListItem(2)");
+	load_image(t, &t->w7_list_sel, "Explorer::ListView.ListItem(3)");
+	load_image(t, &t->w7_list_hot_sel, "Explorer::ListView.ListItem(6)");
+	load_image(t, &t->w7_header, "ItemsView::Header.HeaderItem");
+	load_image(t, &t->w7_scroll_track, "ScrollBar.LowerTrackVert");
+	load_image(t, &t->w7_scroll_thumb, "ScrollBar.ThumbBtnVert");
+	t->w7_scroll_grip = load_ini_file(t, "ScrollBar.GripperVert", "ImageFile1");
+	t->w7_tree_glyph = load_ini_file(t, "Explorer::TreeView.Glyph", "ImageFile1");
+	t->w7_tree_glyph_hot = load_ini_file(t, "Explorer::TreeView.HotGlyph", "ImageFile1");
+	load_image(t, &t->w7_progress_bar, "Progress.Bar");
+	load_image(t, &t->w7_progress_fill, "Progress.Fill");
+	load_image(t, &t->w7_nav_bg, "Navbar::Rebar.Background");
+	t->w7_back = load_ini_file(t, "Navigation.1", "ImageFile1");
+	t->w7_fwd = load_ini_file(t, "Navigation.2", "ImageFile1");
+	load_image(t, &t->w7_addr_band, "AB::AddressBand.1");
+	load_image(t, &t->w7_crumb_btn, "BB::Toolbar.Button");
+	t->w7_crumb_sep = load_ini_file(t, "BB::Toolbar.SplitButtonDropDown", "ImageFile1");
+	load_image(t, &t->w7_search_box, "SearchBox.1");
+	load_image(t, &t->w7_cmd_bar, "CommandModule.1");
+	load_image(t, &t->w7_cmd_btn, "CommandModule.3");
+	load_image(t, &t->w7_details_bg, "PreviewPane.1(1)");
 }
 
 bool theme_load(struct theme *t, const char *dir) {
@@ -586,7 +610,7 @@ bool theme_load(struct theme *t, const char *dir) {
 	ini_ints("SysMetrics", "Background", bg, 3);
 	for (int i = 0; i < 3; i++)
 		t->desktop_bg[i] = bg[i] / 255.0;
-	theme_set_wallpaper(t, "Bliss.jpg", "auto");
+	theme_set_wallpaper(t, t->version == 7 ? "Windows 7.jpg" : "Bliss.jpg", "auto");
 	theme_set_user_picture(t, "");
 	return t->caption.s != NULL;
 }
