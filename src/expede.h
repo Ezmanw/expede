@@ -53,7 +53,7 @@ struct view {
 	struct wl_listener deco_destroy, deco_request_mode;
 };
 
-enum grab_mode { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_BUTTON };
+enum grab_mode { GRAB_NONE, GRAB_MOVE, GRAB_RESIZE, GRAB_BUTTON, GRAB_SNIP };
 
 struct server {
 	struct wl_display *display;
@@ -89,6 +89,8 @@ struct server {
 	double grab_x, grab_y;
 	struct wlr_box grab_box;
 	uint32_t resize_edges;
+	bool snip_dragging;
+	struct wlr_scene_buffer *snip_overlay;
 	uint32_t last_click_ms;
 	/* options from ~/.config/expede/expede.conf */
 	bool opt_snap, opt_tap, opt_modern_start, opt_natural_scroll;

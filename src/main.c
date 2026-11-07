@@ -3,6 +3,7 @@
  * drawn from the Luna theme ripped off the user's own XP ISO. */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <drm_fourcc.h>
 #include <getopt.h>
 #include <linux/input-event-codes.h>
 #include <stdio.h>
@@ -11,14 +12,19 @@
 #include <string.h>
 #include <signal.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <libinput.h>
 #include <wlr/backend/libinput.h>
+#include <wlr/render/wlr_texture.h>
+#include <wlr/types/wlr_buffer.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/types/wlr_viewporter.h>
@@ -55,6 +61,7 @@ struct keyboard {
 };
 
 static struct server *the_server;
+static void snip_begin(struct server *s);
 
 void server_screen(struct server *s, int *w, int *h) {
 	struct wlr_box box;
@@ -64,6 +71,10 @@ void server_screen(struct server *s, int *w, int *h) {
 }
 
 void spawn(const char *cmd) {
+	if (!strcmp(cmd, "expede-snip")) {
+		snip_begin(the_server);
+		return;
+	}
 	if (fork() == 0) {
 		setsid();
 		execl("/bin/sh", "/bin/sh", "-c", cmd, (void *)NULL);
@@ -990,6 +1001,288 @@ static void set_hot(struct server *s, struct view *hv, enum part p) {
 
 static void reset_idle(struct server *s);
 
+/* ---- scene rendering, screenshots and Snipping Tool ---- */
+
+static void render_node(cairo_t *cr, struct wlr_scene_node *n, int ox, int oy,
+		const struct wlr_box *clip, struct wlr_scene_node *stop_before, bool *stopped) {
+	if (*stopped)
+		return;
+	if (n == stop_before) {
+		*stopped = true;
+		return;
+	}
+	if (!n->enabled)
+		return;
+	int nx = ox + n->x, ny = oy + n->y;
+	if (n->type == WLR_SCENE_NODE_TREE) {
+		struct wlr_scene_tree *t = wlr_scene_tree_from_node(n);
+		struct wlr_scene_node *c;
+		wl_list_for_each(c, &t->children, link)
+			render_node(cr, c, nx, ny, clip, stop_before, stopped);
+		return;
+	}
+	if (n->type == WLR_SCENE_NODE_RECT) {
+		struct wlr_scene_rect *r = wlr_scene_rect_from_node(n);
+		if (nx + r->width <= clip->x || ny + r->height <= clip->y ||
+				nx >= clip->x + clip->width || ny >= clip->y + clip->height)
+			return;
+		float a = r->color[3];
+		if (a <= 0)
+			return;
+		cairo_save(cr);
+		cairo_set_source_rgba(cr, r->color[0] / a, r->color[1] / a, r->color[2] / a, a);
+		cairo_rectangle(cr, nx, ny, r->width, r->height);
+		cairo_fill(cr);
+		cairo_restore(cr);
+		return;
+	}
+	if (n->type == WLR_SCENE_NODE_BUFFER) {
+		struct wlr_scene_buffer *sb = wlr_scene_buffer_from_node(n);
+		if (!sb->buffer)
+			return;
+		int bw = sb->buffer->width, bh = sb->buffer->height;
+		int dw = sb->dst_width > 0 ? sb->dst_width : bw;
+		int dh = sb->dst_height > 0 ? sb->dst_height : bh;
+		if (dw <= 0 || dh <= 0 || nx + dw <= clip->x || ny + dh <= clip->y ||
+				nx >= clip->x + clip->width || ny >= clip->y + clip->height)
+			return;
+		struct wlr_buffer *locked = sb->buffer;
+		void *data = NULL;
+		uint32_t fmt = 0;
+		size_t stride = 0;
+		bool ptr_ok = wlr_buffer_begin_data_ptr_access(locked, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &fmt, &stride);
+		struct wlr_client_buffer *cb = ptr_ok ? NULL : wlr_client_buffer_get(sb->buffer);
+		if (!ptr_ok && cb && cb->source) {
+			locked = cb->source;
+			ptr_ok = wlr_buffer_begin_data_ptr_access(locked, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &fmt, &stride);
+		}
+		unsigned char *alloc_px = NULL;
+		if (!ptr_ok || (fmt != DRM_FORMAT_ARGB8888 && fmt != DRM_FORMAT_XRGB8888)) {
+			if (ptr_ok) {
+				wlr_buffer_end_data_ptr_access(locked);
+				ptr_ok = false;
+			}
+			struct wlr_texture *tex = sb->texture ? sb->texture : (cb ? cb->texture : NULL);
+			if (!tex)
+				return;
+			stride = (size_t)bw * 4;
+			alloc_px = malloc(stride * bh);
+			if (!alloc_px || !wlr_texture_read_pixels(tex, &(struct wlr_texture_read_pixels_options){
+					.data = alloc_px, .format = DRM_FORMAT_ARGB8888, .stride = stride })) {
+				free(alloc_px);
+				return;
+			}
+			data = alloc_px;
+			fmt = DRM_FORMAT_ARGB8888;
+		}
+		cairo_format_t cfmt = fmt == DRM_FORMAT_XRGB8888 ? CAIRO_FORMAT_RGB24 : CAIRO_FORMAT_ARGB32;
+		cairo_surface_t *img = cairo_image_surface_create_for_data(data, cfmt, bw, bh, stride);
+		struct wlr_fbox src = sb->src_box;
+		if (wlr_fbox_empty(&src))
+			src = (struct wlr_fbox){0, 0, bw, bh};
+		cairo_save(cr);
+		cairo_rectangle(cr, nx, ny, dw, dh);
+		cairo_clip(cr);
+		cairo_translate(cr, nx, ny);
+		cairo_scale(cr, dw / src.width, dh / src.height);
+		cairo_set_source_surface(cr, img, -src.x, -src.y);
+		cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+		if (sb->opacity < 1.0f)
+			cairo_paint_with_alpha(cr, sb->opacity);
+		else
+			cairo_paint(cr);
+		cairo_restore(cr);
+		cairo_surface_destroy(img);
+		if (ptr_ok)
+			wlr_buffer_end_data_ptr_access(locked);
+		free(alloc_px);
+	}
+}
+
+static cairo_surface_t *capture_box(struct wlr_scene_node *root, int rx, int ry, struct wlr_box box) {
+	if (box.width <= 0 || box.height <= 0)
+		return NULL;
+	cairo_surface_t *s = canvas_new(box.width, box.height);
+	cairo_t *cr = cairo_create(s);
+	cairo_translate(cr, -box.x, -box.y);
+	bool stopped = false;
+	render_node(cr, root, rx, ry, &box, NULL, &stopped);
+	cairo_destroy(cr);
+	cairo_surface_set_device_scale(s, 1, 1);
+	return s;
+}
+
+struct png_buf {
+	unsigned char *data;
+	size_t len, cap;
+};
+
+static cairo_status_t png_write_cb(void *closure, const unsigned char *data, unsigned int length) {
+	struct png_buf *b = closure;
+	if (b->len + length > b->cap) {
+		b->cap = (b->len + length) * 2 + 4096;
+		b->data = realloc(b->data, b->cap);
+	}
+	memcpy(b->data + b->len, data, length);
+	b->len += length;
+	return CAIRO_STATUS_SUCCESS;
+}
+
+struct clip_source {
+	struct wlr_data_source base;
+	unsigned char *data;
+	size_t len;
+};
+
+static void clip_send(struct wlr_data_source *source, const char *mime_type, int32_t fd) {
+	struct clip_source *cs = wl_container_of(source, cs, base);
+	if (!strcmp(mime_type, "image/png")) {
+		pid_t pid = fork();
+		if (pid == 0) {
+			if (fork() == 0) {
+				size_t off = 0;
+				while (off < cs->len) {
+					ssize_t n = write(fd, cs->data + off, cs->len - off);
+					if (n <= 0)
+						break;
+					off += n;
+				}
+				close(fd);
+				_exit(0);
+			}
+			_exit(0);
+		}
+		if (pid > 0)
+			waitpid(pid, NULL, 0);
+	}
+	close(fd);
+}
+
+static void clip_destroy(struct wlr_data_source *source) {
+	struct clip_source *cs = wl_container_of(source, cs, base);
+	free(cs->data);
+	free(cs);
+}
+
+static const struct wlr_data_source_impl clip_impl = {
+	.send = clip_send,
+	.destroy = clip_destroy,
+};
+
+static void save_screenshot(struct server *s, cairo_surface_t *img) {
+	if (!img)
+		return;
+	struct png_buf pb = {0};
+	cairo_surface_write_to_png_stream(img, png_write_cb, &pb);
+	cairo_surface_destroy(img);
+	if (!pb.data || !pb.len) {
+		free(pb.data);
+		return;
+	}
+	const char *home = getenv("HOME");
+	if (home && *home) {
+		char dir[512], path[640], ts[64];
+		snprintf(dir, sizeof(dir), "%s/Pictures", home);
+		mkdir(dir, 0755);
+		snprintf(dir, sizeof(dir), "%s/Pictures/Screenshots", home);
+		mkdir(dir, 0755);
+		time_t now = time(NULL);
+		struct tm tm;
+		localtime_r(&now, &tm);
+		strftime(ts, sizeof(ts), "%Y-%m-%d %H-%M-%S", &tm);
+		snprintf(path, sizeof(path), "%s/Screenshot %s.png", dir, ts);
+		for (int n = 2; access(path, F_OK) == 0 && n < 100; n++)
+			snprintf(path, sizeof(path), "%s/Screenshot %s (%d).png", dir, ts, n);
+		FILE *f = fopen(path, "wb");
+		if (f) {
+			fwrite(pb.data, 1, pb.len, f);
+			fclose(f);
+			wlr_log(WLR_INFO, "saved screenshot to %s", path);
+		}
+	}
+	struct clip_source *cs = calloc(1, sizeof(*cs));
+	wlr_data_source_init(&cs->base, &clip_impl);
+	char **mime = wl_array_add(&cs->base.mime_types, sizeof(*mime));
+	*mime = strdup("image/png");
+	cs->data = pb.data;
+	cs->len = pb.len;
+	wlr_seat_set_selection(s->seat, &cs->base, wl_display_next_serial(s->display));
+}
+
+static void screenshot_full(struct server *s) {
+	int sw, sh;
+	server_screen(s, &sw, &sh);
+	save_screenshot(s, capture_box(&s->scene->tree.node, 0, 0, (struct wlr_box){0, 0, sw, sh}));
+}
+
+static void screenshot_window(struct server *s) {
+	struct view *v = focused_view(s);
+	if (!v || !v->mapped || v->minimized) {
+		screenshot_full(s);
+		return;
+	}
+	int fw = view_frame_w(v), fh = caption_h(v) + v->ch + bottom_h(v);
+	save_screenshot(s, capture_box(&v->tree->node, 0, 0, (struct wlr_box){0, 0, fw, fh}));
+}
+
+static void snip_redraw(struct server *s) {
+	int sw, sh;
+	server_screen(s, &sw, &sh);
+	cairo_surface_t *c = canvas_new(sw, sh);
+	cairo_t *cr = cairo_create(c);
+	/* Windows 7 Snipping Tool veil: milky white wash over the desktop */
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.45);
+	cairo_paint(cr);
+	if (s->snip_dragging && s->grab_box.width > 0 && s->grab_box.height > 0) {
+		struct wlr_box b = s->grab_box;
+		cairo_save(cr);
+		cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+		cairo_rectangle(cr, b.x, b.y, b.width, b.height);
+		cairo_fill(cr);
+		cairo_restore(cr);
+		cairo_set_line_width(cr, 1);
+		cairo_set_source_rgb(cr, 0.85, 0.08, 0.08);
+		cairo_rectangle(cr, b.x + 0.5, b.y + 0.5, b.width - 1, b.height - 1);
+		cairo_stroke(cr);
+	} else {
+		const char *msg = "Drag the cursor around the area you want to capture (Esc to cancel)";
+		struct theme *t = theme_of(s, s->style);
+		theme_use_fonts(t);
+		int tw = text_width("Tahoma 9", msg);
+		int bw = tw + 24, bh = 28, bx = (sw - bw) / 2, by = 18;
+		round_path(cr, bx + 0.5, by + 0.5, bw - 1, bh - 1, 4, 4);
+		cairo_set_source_rgba(cr, 1, 1, 0.92, 0.95);
+		cairo_fill_preserve(cr);
+		cairo_set_line_width(cr, 1);
+		cairo_set_source_rgb(cr, 0.45, 0.45, 0.45);
+		cairo_stroke(cr);
+		draw_text(cr, "Tahoma 9", msg, bx + 12, by + 6, 0, 0x000000, 0, 0, 0, true);
+	}
+	cairo_destroy(cr);
+	scene_show(&s->snip_overlay, s->layer_overlay, c, 0, 0);
+}
+
+static void snip_end(struct server *s) {
+	s->grab = GRAB_NONE;
+	s->snip_dragging = false;
+	if (s->snip_overlay)
+		wlr_scene_node_set_enabled(&s->snip_overlay->node, false);
+	wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "default");
+}
+
+static void snip_begin(struct server *s) {
+	if (!s || (s->session && session_active(s->session)))
+		return;
+	if (s->shell && shell_start_open(s->shell))
+		shell_toggle_start(s->shell);
+	s->grab = GRAB_SNIP;
+	s->snip_dragging = false;
+	s->grab_box = (struct wlr_box){0};
+	snip_redraw(s);
+	wlr_seat_pointer_clear_focus(s->seat);
+	wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "crosshair");
+}
+
 static void process_motion(struct server *s, uint32_t time) {
 	reset_idle(s);
 	double lx = s->cursor->x, ly = s->cursor->y;
@@ -997,6 +1290,24 @@ static void process_motion(struct server *s, uint32_t time) {
 		s->grab = GRAB_NONE;
 		wlr_seat_pointer_clear_focus(s->seat);
 		session_motion(s->session, lx, ly);
+		return;
+	}
+	if (s->grab == GRAB_SNIP) {
+		wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "crosshair");
+		if (s->snip_dragging) {
+			int sw, sh;
+			server_screen(s, &sw, &sh);
+			int x0 = (int)(s->grab_x < lx ? s->grab_x : lx);
+			int y0 = (int)(s->grab_y < ly ? s->grab_y : ly);
+			int x1 = (int)(s->grab_x > lx ? s->grab_x : lx);
+			int y1 = (int)(s->grab_y > ly ? s->grab_y : ly);
+			if (x0 < 0) x0 = 0;
+			if (y0 < 0) y0 = 0;
+			if (x1 > sw) x1 = sw;
+			if (y1 > sh) y1 = sh;
+			s->grab_box = (struct wlr_box){x0, y0, x1 - x0, y1 - y0};
+			snip_redraw(s);
+		}
 		return;
 	}
 	if (s->grab == GRAB_MOVE) {
@@ -1094,6 +1405,24 @@ static void on_cursor_button(struct wl_listener *l, void *data) {
 	struct wlr_pointer_button_event *e = data;
 	double lx = s->cursor->x, ly = s->cursor->y;
 	bool pressed = e->state == WL_POINTER_BUTTON_STATE_PRESSED;
+
+	if (s->grab == GRAB_SNIP) {
+		if (e->button == BTN_RIGHT && pressed) {
+			snip_end(s);
+		} else if (e->button == BTN_LEFT && pressed) {
+			s->snip_dragging = true;
+			s->grab_x = lx;
+			s->grab_y = ly;
+			s->grab_box = (struct wlr_box){(int)lx, (int)ly, 0, 0};
+			snip_redraw(s);
+		} else if (e->button == BTN_LEFT && !pressed && s->snip_dragging) {
+			struct wlr_box b = s->grab_box;
+			snip_end(s);
+			if (b.width > 1 && b.height > 1)
+				save_screenshot(s, capture_box(&s->scene->tree.node, 0, 0, b));
+		}
+		return;
+	}
 
 	if (!pressed && s->grab != GRAB_NONE) {
 		if (s->grab == GRAB_BUTTON) {
@@ -1199,6 +1528,24 @@ static void cycle_windows(struct server *s) {
 static bool handle_binding(struct server *s, xkb_keysym_t sym, uint32_t mods) {
 	if ((mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) == (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) && sym == XKB_KEY_BackSpace) {
 		wl_display_terminate(s->display);
+		return true;
+	}
+	if (s->grab == GRAB_SNIP && sym == XKB_KEY_Escape) {
+		snip_end(s);
+		return true;
+	}
+	if (sym == XKB_KEY_Print || sym == XKB_KEY_Sys_Req) {
+		if (mods & WLR_MODIFIER_SHIFT)
+			snip_begin(s);
+		else if (mods & WLR_MODIFIER_ALT)
+			screenshot_window(s);
+		else
+			screenshot_full(s);
+		return true;
+	}
+	if ((mods & (WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT)) == (WLR_MODIFIER_LOGO | WLR_MODIFIER_SHIFT) &&
+			(sym == XKB_KEY_s || sym == XKB_KEY_S)) {
+		snip_begin(s);
 		return true;
 	}
 	if (mods & WLR_MODIFIER_ALT) {
@@ -1883,6 +2230,12 @@ static int on_sighup(int sig, void *data) {
 	return 0;
 }
 
+static int on_sigusr1(int sig, void *data) {
+	(void)sig;
+	snip_begin(data);
+	return 0;
+}
+
 int main(int argc, char *argv[]) {
 	wlr_log_init(WLR_INFO, NULL);
 	const char *startup = NULL;
@@ -1937,6 +2290,7 @@ int main(int argc, char *argv[]) {
 	wlr_fractional_scale_manager_v1_create(s.display, 1);
 	wlr_subcompositor_create(s.display);
 	wlr_data_device_manager_create(s.display);
+	wlr_screencopy_manager_v1_create(s.display);
 
 	s.output_layout = wlr_output_layout_create(s.display);
 	wl_list_init(&s.outputs);
@@ -2002,6 +2356,7 @@ int main(int argc, char *argv[]) {
 	s.idle_inhibit = wlr_idle_inhibit_v1_create(s.display);
 	s.idle_timer = wl_event_loop_add_timer(wl_display_get_event_loop(s.display), idle_fire, &s);
 	wl_event_loop_add_signal(wl_display_get_event_loop(s.display), SIGHUP, on_sighup, &s);
+	wl_event_loop_add_signal(wl_display_get_event_loop(s.display), SIGUSR1, on_sigusr1, &s);
 
 	const char *socket = wl_display_add_socket_auto(s.display);
 	if (!socket || !wlr_backend_start(s.backend)) {

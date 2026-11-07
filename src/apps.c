@@ -164,6 +164,15 @@ void apps_load(void) {
 	scan_dir("/var/lib/flatpak/exports/share/applications");
 	snprintf(dir, sizeof(dir), "%s/.local/share/flatpak/exports/share/applications", home);
 	scan_dir(dir);
+	if (!have_app("expede-snip.desktop")) {
+		if (n_apps == cap_apps) {
+			cap_apps = cap_apps ? cap_apps * 2 : 64;
+			apps = realloc(apps, cap_apps * sizeof(*apps));
+		}
+		apps[n_apps++] = (struct app){.id = strdup("expede-snip.desktop"), .name = strdup("Snipping Tool"),
+			.exec = strdup("expede-snip"), .icon_name = strdup("accessories-screenshot"),
+			.keywords = strdup("screenshot;snip;capture")};
+	}
 	qsort(apps, n_apps, sizeof(*apps), by_name);
 }
 
