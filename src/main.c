@@ -2027,10 +2027,8 @@ static bool handle_binding(struct server *s, xkb_keysym_t sym, uint32_t mods) {
 		shell_toggle_start(s->shell);
 		return true;
 	}
-	if (sym == XKB_KEY_Super_L || sym == XKB_KEY_Super_R) {
-		shell_toggle_start(s->shell);
-		return true;
-	}
+	if (sym == XKB_KEY_Super_L || sym == XKB_KEY_Super_R)
+		return true; /* Start opens when it is released */
 	if ((mods & WLR_MODIFIER_LOGO) && sym == XKB_KEY_r) {
 		spawn("foot");
 		return true;
@@ -2105,12 +2103,25 @@ static void kb_key(struct wl_listener *l, void *data) {
 			}
 		return;
 	}
-	if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED && shell_start_open(s->shell)) {
+	if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED && shell_start_open(s->shell) && !(mods & WLR_MODIFIER_LOGO)) {
 		char utf8[16] = "";
 		xkb_state_key_get_utf8(k->wlr_keyboard->xkb_state, keycode, utf8, sizeof(utf8));
 		for (int i = 0; i < n; i++)
 			if (shell_key(s->shell, syms[i], utf8))
 				return;
+	}
+	/* Win opens Start when it is let go on its own; Win+Tab, Win+E... don't */
+	for (int i = 0; i < n; i++) {
+		bool super = syms[i] == XKB_KEY_Super_L || syms[i] == XKB_KEY_Super_R;
+		if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED)
+			s->super_alone = super;
+		else if (super && s->super_alone) {
+			s->super_alone = false;
+			if (shell_overlay_open(s->shell))
+				shell_close_overlays(s->shell);
+			shell_toggle_start(s->shell);
+			handled = true;
+		}
 	}
 	if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED)
 		for (int i = 0; i < n; i++)

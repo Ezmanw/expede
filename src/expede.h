@@ -87,6 +87,7 @@ struct server {
 	struct wlr_buffer *glass_buf; /* the desktop, blurred, at 1/GLASS_DIV of the screen */
 	char cursor_theme[32];
 	bool own_gtk_theme;
+	bool super_alone; /* Win is down and nothing else has been pressed with it */
 
 	enum grab_mode grab;
 	struct view *grab_view;
