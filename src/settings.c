@@ -1163,7 +1163,7 @@ static void slider(struct ui_win *w, cairo_t *cr, int id, int x, int y, int sw, 
 		int tw = text_width("Tahoma 8", pct) + 10;
 		int bx = tx + 5 - tw / 2;
 		int by = y - 20;
-		bool w7 = ui_theme.version == 7;
+		bool w7 = ui_theme.version >= 7;
 		ui_fill(cr, bx, by, tw, 17, w7 ? 0x767676 : 0x000000);
 		ui_fill(cr, bx + 1, by + 1, tw - 2, 15, w7 ? 0xf5f6f8 : 0xffffe1);
 		ui_text(cr, "Tahoma 8", pct, bx + 5, by + 2, 0, 0x000000);
@@ -1184,7 +1184,7 @@ static int slider_value(struct ui_win *w, int id, double px) {
 /* a white list box; rows registered as base + index */
 static void listbox(struct ui_win *w, cairo_t *cr, int base, int x, int y, int lw, int lh, int n, int sel, int *scroll,
 		struct ui_rect *box, const char *(*label)(int i), cairo_surface_t *(*ic)(int i), int row_h) {
-	bool w7 = ui_theme.version == 7;
+	bool w7 = ui_theme.version >= 7;
 	ui_fill(cr, x, y, lw, lh, w7 ? 0xabadb3 : 0x7f9db9);
 	ui_fill(cr, x + 1, y + 1, lw - 2, lh - 2, 0xffffff);
 	*box = (struct ui_rect){0, x, y, lw, lh};
@@ -1236,7 +1236,7 @@ static bool is_live(enum kind k) {
 static void tabs_and_buttons(struct sheet *s, cairo_t *cr) {
 	struct ui_win *w = s->win;
 	const struct applet *a = &applets[s->kind];
-	bool w7 = ui_theme.version == 7;
+	bool w7 = ui_theme.version >= 7;
 	ui_fill(cr, 0, 0, w->w, w->h, w7 ? 0xf0f0f0 : 0xece9d8);
 	if (a->tabs[0]) {
 		if (w7)
@@ -1706,7 +1706,7 @@ static void pkg_install(void) {
 
 static void paint_programs(struct sheet *s, cairo_t *cr) {
 	struct ui_win *w = s->win;
-	bool w7 = ui_theme.version == 7;
+	bool w7 = ui_theme.version >= 7;
 	ui_fill(cr, 0, 0, w->w, w->h, w7 ? 0xffffff : 0xece9d8);
 	if (w7) {
 		cairo_pattern_t *g = cairo_pattern_create_linear(0, 0, 0, w->h);
@@ -1903,7 +1903,7 @@ static void paint_power(struct sheet *s, cairo_t *cr) {
 		ui_text(cr, "Trebuchet MS, Bold 14", pct, 76, 52, 0, 0x0a246a);
 		ui_text(cr, "Tahoma 8", battery_state, 78, 80, 0, 0x000000);
 		int p = atoi(battery_pct);
-		if (ui_theme.version == 7 && ui_theme.w7_progress_bar.s) {
+		if (ui_theme.version >= 7 && ui_theme.w7_progress_bar.s) {
 			draw_image(cr, &ui_theme.w7_progress_bar, 0, 30, 110, SHEET_W - 60, 16);
 			if (p > 0)
 				draw_image(cr, &ui_theme.w7_progress_fill, 0, 31, 111, (SHEET_W - 62) * p / 100, 14);
@@ -2040,7 +2040,7 @@ static void paint_users(struct sheet *s, cairo_t *cr) {
 	for (int i = 0; i < n_pictures; i++)
 		if (pl && !strncmp(pictures[i].value, cfg.picture, pl) && pictures[i].value[pl] == '.')
 			cur = pictures[i].img;
-	if (ui_theme.version == 7 && ui_theme.w7_userframe) {
+	if (ui_theme.version >= 7 && ui_theme.w7_userframe) {
 		ui_icon(cr, cur ? cur : ui_theme.user_pic, 26, 44, 48);
 		ui_icon(cr, ui_theme.w7_userframe, 18, 36, 64);
 	} else {
@@ -2111,7 +2111,7 @@ static void task_link(struct ui_win *w, cairo_t *cr, int id, int x, int y, const
 }
 
 static void paint_cp(struct ui_win *w, cairo_t *cr) {
-	bool w7 = ui_theme.version == 7;
+	bool w7 = ui_theme.version >= 7;
 	ui_fill(cr, 0, 0, w->w, w->h, 0xffffff);
 	if (w7) {
 		/* Windows 7 Control Panel left task pane (ControlPanel.1 gradient) */

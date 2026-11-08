@@ -245,7 +245,7 @@ void theme_use_fonts(const struct theme *t) {
 static PangoFontDescription *version_font(const char *font) {
 	PangoFontDescription *d = pango_font_description_from_string(font);
 	const char *fam = pango_font_description_get_family(d);
-	if (font_version == 7 && fam && (!strcasecmp(fam, "Tahoma") || !strcasecmp(fam, "Trebuchet MS"))) {
+	if (font_version >= 7 && fam && (!strcasecmp(fam, "Tahoma") || !strcasecmp(fam, "Trebuchet MS"))) {
 		pango_font_description_set_family(d, "Segoe UI");
 		int sz = pango_font_description_get_size(d) / PANGO_SCALE;
 		if (sz == 8)
@@ -268,7 +268,7 @@ static PangoLayout *make_layout(cairo_t *cr, const char *font, const char *text,
 	pango_cairo_context_set_resolution(pango_layout_get_context(l), 96);
 	pango_layout_context_changed(l);
 	PangoFontDescription *d = version_font(font);
-	if (font_version == 7)
+	if (font_version >= 7)
 		crisp = false; /* ClearType-era text is smoothed */
 	pango_layout_set_font_description(l, d);
 	pango_font_description_free(d);
@@ -559,7 +559,7 @@ bool theme_load(struct theme *t, const char *dir) {
 	ini_text = calloc(1, n + 1);
 	fread(ini_text, 1, n, f);
 	fclose(f);
-	t->version = strstr(ini_text, "; Windows 7") == ini_text ? 7 : 0;
+	t->version = strstr(ini_text, "; Windows 7") == ini_text ? 7 : strstr(ini_text, "; Windows 10") == ini_text ? 10 : 0;
 
 	load_image(t, &t->caption, "Window.Caption");
 	load_image(t, &t->max_caption, "Window.MaxCaption");
@@ -610,7 +610,7 @@ bool theme_load(struct theme *t, const char *dir) {
 	ini_ints("SysMetrics", "Background", bg, 3);
 	for (int i = 0; i < 3; i++)
 		t->desktop_bg[i] = bg[i] / 255.0;
-	theme_set_wallpaper(t, t->version == 7 ? "Windows 7.jpg" : "Bliss.jpg", "auto");
+	theme_set_wallpaper(t, t->version == 10 ? "Windows 10.jpg" : t->version == 7 ? "Windows 7.jpg" : "Bliss.jpg", "auto");
 	theme_set_user_picture(t, "");
 	return t->caption.s != NULL;
 }

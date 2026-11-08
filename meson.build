@@ -44,6 +44,7 @@ executable('expede',
 		dependency('pangocairo'),
 		dependency('gdk-pixbuf-2.0'),
 		dependency('libdrm').partial_dependency(compile_args: true, includes: true),
+		meson.get_compiler('c').find_library('m'),
 	],
 	install: true)
 

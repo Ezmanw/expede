@@ -85,7 +85,8 @@ const char *ui_shell_quote(const char *s, char *out, size_t cap) {
 	return out;
 }
 
-static bool want_w7_style(void) {
+/* "xp", "7" or "10": the Windows version the user picked */
+static const char *want_style(void) {
 	char path[512], line[512], key[64], val[256];
 	const char *xdg = getenv("XDG_CONFIG_HOME");
 	if (xdg && *xdg)
@@ -93,7 +94,7 @@ static bool want_w7_style(void) {
 	else
 		snprintf(path, sizeof(path), "%s/.config/expede/expede.conf", getenv("HOME"));
 	FILE *f = fopen(path, "r");
-	bool is7 = false;
+	const char *st = "xp";
 	while (f && fgets(line, sizeof(line), f)) {
 		char *eq = strchr(line, '=');
 		if (line[0] == '#' || !eq || sscanf(line, " %63[^= ]", key) != 1 || strcmp(key, "style"))
@@ -105,11 +106,16 @@ static bool want_w7_style(void) {
 		while (n && (v[n - 1] == ' ' || v[n - 1] == '\t'))
 			n--;
 		snprintf(val, sizeof(val), "%.*s", (int)n, v);
-		is7 = !strcasecmp(val, "7") || !strcasecmp(val, "win7") || !strcasecmp(val, "windows7");
+		if (!strcasecmp(val, "7") || !strcasecmp(val, "win7") || !strcasecmp(val, "windows7"))
+			st = "7";
+		else if (!strcasecmp(val, "10") || !strcasecmp(val, "win10") || !strcasecmp(val, "windows10"))
+			st = "10";
+		else
+			st = "xp";
 	}
 	if (f)
 		fclose(f);
-	return is7;
+	return st;
 }
 
 const char *ui_assets_dir(void) {
@@ -123,10 +129,16 @@ const char *ui_assets_dir(void) {
 		snprintf(base, sizeof(base), "%s/expede", xdg);
 	else
 		snprintf(base, sizeof(base), "%s/.local/share/expede", getenv("HOME"));
-	const char *pref = want_w7_style() ? "7" : "xp";
-	const char *alt = want_w7_style() ? "xp" : "7";
-	snprintf(ini, sizeof(ini), "%s/%s/luna/normalblue.ini", base, pref);
-	snprintf(buf, sizeof(buf), "%s/%s", base, access(ini, R_OK) == 0 ? pref : alt);
+	/* the chosen version's rip, else whichever one there is */
+	const char *order[4] = {want_style(), "xp", "7", "10"};
+	for (int i = 0; i < 4; i++) {
+		snprintf(ini, sizeof(ini), "%s/%s/luna/normalblue.ini", base, order[i]);
+		if (access(ini, R_OK) == 0) {
+			snprintf(buf, sizeof(buf), "%s/%s", base, order[i]);
+			return buf;
+		}
+	}
+	snprintf(buf, sizeof(buf), "%s/xp", base);
 	return buf;
 }
 
@@ -169,36 +181,36 @@ void ui_button(struct ui_win *w, cairo_t *cr, int id, int x, int y, int bw, cons
 	int f = disabled ? 3 : ui_state(w, id) ? ui_state(w, id) : def ? 4 : 0;
 	draw_image(cr, &ui_theme.push_button, f, x, y, bw, 23);
 	int tw = text_width("Tahoma 8", label);
-	ui_text(cr, "Tahoma 8", label, x + (bw - tw) / 2, y + (ui_theme.version == 7 ? 4 : 5), 0,
-		disabled ? (ui_theme.version == 7 ? 0x838383 : 0xaca899) : 0x000000);
+	ui_text(cr, "Tahoma 8", label, x + (bw - tw) / 2, y + (ui_theme.version >= 7 ? 4 : 5), 0,
+		disabled ? (ui_theme.version >= 7 ? 0x838383 : 0xaca899) : 0x000000);
 	if (!disabled)
 		ui_reg(w, id, x, y, bw, 23);
 }
 
 void ui_check(struct ui_win *w, cairo_t *cr, int id, int x, int y, bool on, bool radio, const char *label) {
 	/* checkbox: unchecked n/h/p/d, checked n/h/p/d...; radio: unchecked x4, checked x4 */
-	draw_frame_true(cr, radio ? ui_theme.radio : ui_theme.checkbox, radio ? 8 : ui_theme.version == 7 ? 20 : 12,
+	draw_frame_true(cr, radio ? ui_theme.radio : ui_theme.checkbox, radio ? 8 : ui_theme.version >= 7 ? 20 : 12,
 		(on ? 4 : 0) + ui_state(w, id), x, y + 1);
-	ui_text(cr, "Tahoma 8", label, x + 19, y + (ui_theme.version == 7 ? 0 : 1), 0, 0x000000);
+	ui_text(cr, "Tahoma 8", label, x + 19, y + (ui_theme.version >= 7 ? 0 : 1), 0, 0x000000);
 	ui_reg(w, id, x, y, 19 + text_width("Tahoma 8", label) + 4, 16);
 }
 
 void ui_group(cairo_t *cr, int x, int y, int gw, int gh, const char *title) {
 	draw_image(cr, &ui_theme.groupbox, 0, x, y + 6, gw, gh - 6);
 	int tw = text_width("Tahoma 8", title);
-	ui_fill(cr, x + 6, y, tw + 6, 14, ui_theme.version == 7 ? 0xffffff : 0xfcfcfe);
-	ui_text(cr, "Tahoma 8", title, x + 9, y, 0, ui_theme.version == 7 ? 0x000000 : 0x0046d5);
+	ui_fill(cr, x + 6, y, tw + 6, 14, ui_theme.version >= 7 ? 0xffffff : 0xfcfcfe);
+	ui_text(cr, "Tahoma 8", title, x + 9, y, 0, ui_theme.version >= 7 ? 0x000000 : 0x0046d5);
 }
 
 void ui_field(struct ui_win *w, cairo_t *cr, int id, int x, int y, int fw, int fh, const char *text, bool focused, int caret) {
-	if (ui_theme.version == 7 && ui_theme.w7_edit.s) {
+	if (ui_theme.version >= 7 && ui_theme.w7_edit.s) {
 		ui_fill(cr, x + 1, y + 1, fw - 2, fh - 2, 0xffffff);
 		draw_image(cr, &ui_theme.w7_edit, focused ? 2 : ui_state(w, id) ? 1 : 0, x, y, fw, fh);
 	} else {
 		ui_fill(cr, x, y, fw, fh, 0x7f9db9);
 		ui_fill(cr, x + 1, y + 1, fw - 2, fh - 2, 0xffffff);
 	}
-	int ty = y + (fh - (ui_theme.version == 7 ? 15 : 13)) / 2;
+	int ty = y + (fh - (ui_theme.version >= 7 ? 15 : 13)) / 2;
 	cairo_save(cr);
 	cairo_rectangle(cr, x + 2, y + 1, fw - 4, fh - 2);
 	cairo_clip(cr);
@@ -207,7 +219,7 @@ void ui_field(struct ui_win *w, cairo_t *cr, int id, int x, int y, int fw, int f
 		char before[1024];
 		snprintf(before, sizeof(before), "%.*s", caret, text);
 		int cx = x + 4 + (caret ? text_width("Tahoma 8", before) : 0);
-		ui_fill(cr, cx, ty, 1, ui_theme.version == 7 ? 15 : 13, 0x000000);
+		ui_fill(cr, cx, ty, 1, ui_theme.version >= 7 ? 15 : 13, 0x000000);
 	}
 	cairo_restore(cr);
 	ui_reg(w, id, x, y, fw, fh);
@@ -268,7 +280,7 @@ int ui_menu_height(const struct ui_menu_item *items, int n) {
 
 void ui_menu(struct ui_win *w, cairo_t *cr, int base_id, int x, int y, const struct ui_menu_item *items, int n) {
 	int mw = 180, mh = ui_menu_height(items, n);
-	bool w7 = ui_theme.version == 7;
+	bool w7 = ui_theme.version >= 7;
 	for (int i = 0; i < n; i++)
 		if (items[i].label) {
 			int tw = text_width(items[i].bold ? "Tahoma Bold 8" : "Tahoma 8", items[i].label) + 48;

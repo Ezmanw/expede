@@ -73,7 +73,11 @@ struct server {
 	struct wlr_seat *seat;
 	struct theme theme;  /* Windows XP (Luna) */
 	struct theme theme7; /* Windows 7 (Aero), when it has been ripped */
-	bool have_xp, have7;
+	struct theme theme10; /* Windows 10 */
+	bool have_xp, have7, have10;
+	/* Windows 10: accent colour, dark taskbar and Start, acrylic, accent on title bars */
+	uint32_t accent_rgb;
+	bool opt_dark, opt_transparency, opt_accent_titlebars;
 	/* which Windows each part looks like: 0 = XP, 7 = Windows 7 ("style" sets them all;
 	 * the advanced options mix them) */
 	int style, st_frames, st_taskbar, st_start, st_logon, st_sounds, st_cursors, st_icons;
@@ -144,6 +148,9 @@ void shell_update_glass(struct shell *sh);
 void draw_glass(struct server *s, cairo_t *cr, double x, double y, double w, double h, double r_top,
 	double r_bottom, bool active);
 
+/* a Segoe MDL2 Assets glyph centred on (cx, cy) */
+void draw_mdl2(cairo_t *cr, const char *utf8, double size_pt, double cx, double cy, uint32_t rgb);
+
 void view_focus(struct view *v);
 void view_set_minimized(struct view *v, bool min);
 void view_close(struct view *v);
@@ -179,6 +186,12 @@ void shell_views_changed(struct shell *sh);
 bool shell_motion(struct shell *sh, double x, double y, bool over_view);
 bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, bool over_view);
 void shell_toggle_start(struct shell *sh);
+/* Windows 10: Task View (every window as a live picture) and Action Center */
+void shell_task_view(struct shell *sh);
+void shell_action_center(struct shell *sh, bool open);
+bool shell_overlay_open(struct shell *sh);
+void shell_close_overlays(struct shell *sh);
+cairo_surface_t *view_snapshot(struct view *v);
 bool shell_start_open(struct shell *sh);
 /* keys and wheel while the Start menu is open; true when used */
 bool shell_key(struct shell *sh, uint32_t sym, const char *utf8);

@@ -50,7 +50,7 @@ void sound_play(struct server *s, const char *name) {
 /* ---- geometry (1024x768 matches XP's own proportions) ---- */
 
 static bool logon7(struct session *se) {
-	return theme_of(se->server, se->server->st_logon)->version == 7;
+	return theme_of(se->server, se->server->st_logon)->version >= 7;
 }
 
 static int top_h(struct session *se) { return se->h * 78 / 768; }

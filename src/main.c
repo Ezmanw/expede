@@ -68,6 +68,8 @@ static struct output_conf *output_conf(struct server *s, const char *name);
 /* the screen with the taskbar: the one marked primary, else the first one plugged in */
 static struct wlr_output *primary_output(struct server *s) {
 	struct output *o, *first = NULL;
+	if (!s->output_layout)
+		return NULL; /* still starting up: no screens yet */
 	wl_list_for_each_reverse(o, &s->outputs, link) {
 		if (!o->wlr_output->enabled)
 			continue;
@@ -183,13 +185,17 @@ static struct icon_set icon_for_app(struct theme *t, const char *app_id) {
 }
 
 struct theme *theme_of(struct server *s, int style) {
-	if ((style == 7 && s->have7) || !s->have_xp)
+	if (style == 10 && s->have10)
+		return &s->theme10;
+	if ((style == 7 && s->have7) || (!s->have_xp && s->have7))
 		return &s->theme7;
+	if (!s->have_xp)
+		return &s->theme10;
 	return &s->theme;
 }
 
 int taskbar_h(struct server *s) {
-	return theme_of(s, s->st_taskbar)->version == 7 ? 40 : TASKBAR_H;
+	return theme_of(s, s->st_taskbar)->version >= 7 ? 40 : TASKBAR_H;
 }
 
 /* Windows 7 frames: 8px glass borders and a 30px caption (22 when maximized) */
@@ -199,22 +205,40 @@ static bool w7(struct view *v) {
 	return theme_of(v->server, v->server->st_frames)->version == 7;
 }
 
+/* Windows 10 frames: a 1px border with a soft shadow (which is also the resize
+ * edge) around a flat 31px title bar (23 when maximized) */
+#define W10_SHADOW 8
+#define W10_CAPTION 32
+static bool w10(struct view *v) {
+	return theme_of(v->server, v->server->st_frames)->version == 10;
+}
+
 /* Frame sizes. Apps that draw their own title bar (GTK4, Chromium, Electron...)
  * get no frame at all, so there is never a second title bar. */
 static int side_w(struct view *v) {
-	return v->csd || v->fullscreen || v->maximized ? 0 : w7(v) ? W7_BORDER : BORDER;
+	return v->csd || v->fullscreen || v->maximized ? 0 : w10(v) ? W10_SHADOW : w7(v) ? W7_BORDER : BORDER;
 }
 
 static int caption_h(struct view *v) {
 	if (v->csd || v->fullscreen)
 		return 0;
+	if (w10(v))
+		return v->maximized ? 23 : W10_CAPTION;
 	if (w7(v))
 		return v->maximized ? 22 : W7_CAPTION;
 	return v->maximized ? CAPTION - BORDER : CAPTION;
 }
 
 static int bottom_h(struct view *v) {
-	return v->csd || v->fullscreen || v->maximized ? 0 : w7(v) ? W7_BORDER : BORDER;
+	return v->csd || v->fullscreen || v->maximized ? 0 : w10(v) ? W10_SHADOW : w7(v) ? W7_BORDER : BORDER;
+}
+
+/* Windows 10 caption buttons: 46 wide, the title bar's full height, flush right */
+static void w10_buttons(struct view *v, int fw, struct wlr_box *mn, struct wlr_box *mx, struct wlr_box *cl) {
+	int inset = v->maximized ? 0 : W10_SHADOW, y = v->maximized ? 0 : 1, h = caption_h(v) - y;
+	*cl = (struct wlr_box){fw - inset - 46, y, 46, h};
+	*mx = (struct wlr_box){cl->x - 46, y, 46, h};
+	*mn = (struct wlr_box){mx->x - 46, y, 46, h};
 }
 
 /* Windows 7 caption buttons hang from the top edge: min and max 26 wide, close 45 */
@@ -235,9 +259,12 @@ static enum part button_at(struct view *v, double lx, double ly) {
 		return PART_NONE;
 	int fw = view_frame_w(v);
 	double x = lx - v->x, y = ly - v->y;
-	if (w7(v)) {
+	if (w7(v) || w10(v)) {
 		struct wlr_box b[3];
-		w7_buttons(v, fw, &b[0], &b[1], &b[2]);
+		if (w10(v))
+			w10_buttons(v, fw, &b[0], &b[1], &b[2]);
+		else
+			w7_buttons(v, fw, &b[0], &b[1], &b[2]);
 		static const enum part parts[3] = {PART_MIN, PART_MAX, PART_CLOSE};
 		for (int i = 0; i < 3; i++)
 			if (x >= b[i].x && x < b[i].x + b[i].width && y >= b[i].y && y < b[i].y + b[i].height)
@@ -569,12 +596,113 @@ static void glass_changed_above(struct view *v) {
 		shell_update_glass(s->shell);
 }
 
+/* ---- Windows 10 ---- */
+
+static void set_rgb(cairo_t *cr, uint32_t rgb, double a) {
+	cairo_set_source_rgba(cr, ((rgb >> 16) & 255) / 255.0, ((rgb >> 8) & 255) / 255.0, (rgb & 255) / 255.0, a);
+}
+
+/* a Segoe MDL2 Assets glyph (the icon font Windows 10's shell draws with), centred in a box */
+void draw_mdl2(cairo_t *cr, const char *utf8, double size_pt, double cx, double cy, uint32_t rgb) {
+	char font[48];
+	snprintf(font, sizeof(font), "Segoe MDL2 Assets %.1f", size_pt);
+	int w = text_width(font, utf8);
+	draw_text(cr, font, utf8, cx - w / 2.0, cy - size_pt * 96 / 72 * 0.62, 0, rgb, 0, 0, 0, false);
+}
+
+/* everything Windows 10 draws for a window's frame, in frame coordinates */
+static cairo_surface_t *w10_piece(struct view *v, int px, int py, int pw, int ph) {
+	struct server *s = v->server;
+	int fw = view_frame_w(v), caph = caption_h(v), sw = side_w(v), fh = caph + v->ch + bottom_h(v);
+	cairo_surface_t *c = canvas_new(pw, ph);
+	cairo_t *cr = cairo_create(c);
+	cairo_translate(cr, -px, -py);
+	bool max = v->maximized, accent = s->opt_accent_titlebars && v->active;
+	/* the soft shadow outside the 1px border (none when maximized) */
+	if (!max) {
+		for (int i = 0; i < W10_SHADOW; i++) {
+			double a = 0.012 * (i + 1) * (i + 1) / W10_SHADOW;
+			cairo_rectangle(cr, W10_SHADOW - 1 - i - 0.5, 4 - i * 0.5, fw - 2 * (W10_SHADOW - 1 - i) + 1,
+				fh - 4 + i * 1.5 - (W10_SHADOW - 1 - i));
+			cairo_set_source_rgba(cr, 0, 0, 0, a * (v->active ? 1 : 0.6));
+			cairo_set_line_width(cr, 1);
+			cairo_stroke(cr);
+		}
+	}
+	int bx = max ? 0 : sw - 1, bw = max ? fw : v->cw + 2;
+	/* title bar */
+	uint32_t bar = accent ? s->accent_rgb : 0xffffff;
+	set_rgb(cr, bar, 1);
+	cairo_rectangle(cr, bx, 0, bw, caph);
+	cairo_fill(cr);
+	/* 1px border: the accent when title bars use it, else a quiet grey */
+	if (!max) {
+		set_rgb(cr, accent ? s->accent_rgb : v->active ? 0x8b8b8b : 0xaaaaaa, 1);
+		cairo_set_line_width(cr, 1);
+		cairo_rectangle(cr, bx + 0.5, 0.5, bw - 1, caph + v->ch + 1);
+		cairo_stroke(cr);
+	}
+	uint32_t fg = accent ? 0xffffff : v->active ? 0x000000 : 0x999999;
+	struct wlr_box mn, mx, cl;
+	w10_buttons(v, fw, &mn, &mx, &cl);
+	int ix = (max ? 0 : sw) + 8, iy = (caph - 16) / 2 + (max ? 0 : 1);
+	if (v->icon.s16)
+		draw_surface(cr, v->icon.s16, ix, iy);
+	const char *title = v->xt->title && *v->xt->title ? v->xt->title : "";
+	theme_use_fonts(&s->theme10);
+	int tx = ix + (v->icon.s16 ? 24 : 0), tmax = mn.x - tx - 8;
+	if (tmax > 0)
+		draw_text(cr, "Segoe UI 9", title, tx, iy, tmax, fg, 0, 0, 0, false);
+	/* caption buttons: grey on hover, red for close */
+	struct { struct wlr_box b; enum part p; const char *glyph; } btn[3] = {
+		{mn, PART_MIN, "\uE921"}, {mx, PART_MAX, max ? "\uE923" : "\uE922"}, {cl, PART_CLOSE, "\uE8BB"}};
+	for (int i = 0; i < 3; i++) {
+		bool hot = v->hot == btn[i].p, pr = v->pressed == btn[i].p && hot;
+		uint32_t gcol = fg;
+		if (hot || pr) {
+			if (btn[i].p == PART_CLOSE) {
+				set_rgb(cr, pr ? 0xf1707a : 0xe81123, 1);
+				gcol = 0xffffff;
+			} else {
+				cairo_set_source_rgba(cr, accent ? 1 : 0, accent ? 1 : 0, accent ? 1 : 0, pr ? 0.2 : 0.1);
+			}
+			cairo_rectangle(cr, btn[i].b.x, btn[i].b.y, btn[i].b.width, btn[i].b.height);
+			cairo_fill(cr);
+		}
+		draw_mdl2(cr, btn[i].glyph, 7.5, btn[i].b.x + btn[i].b.width / 2.0, btn[i].b.y + btn[i].b.height / 2.0, gcol);
+	}
+	cairo_destroy(cr);
+	return c;
+}
+
+static void view_redraw_w10(struct view *v) {
+	int fw = view_frame_w(v), caph = caption_h(v), sw = side_w(v), bh = bottom_h(v);
+	for (int i = 0; i < 5; i++)
+		if (v->glass[i])
+			wlr_scene_node_set_enabled(&v->glass[i]->node, false);
+	set_deco(&v->deco[0], v->tree, w10_piece(v, 0, 0, fw, caph), 0, 0);
+	if (v->maximized) {
+		for (int i = 1; i < 4; i++)
+			if (v->deco[i])
+				wlr_scene_node_set_enabled(&v->deco[i]->node, false);
+		return;
+	}
+	set_deco(&v->deco[1], v->tree, w10_piece(v, 0, caph, sw, v->ch), 0, caph);
+	set_deco(&v->deco[2], v->tree, w10_piece(v, sw + v->cw, caph, sw, v->ch), sw + v->cw, caph);
+	set_deco(&v->deco[3], v->tree, w10_piece(v, 0, caph + v->ch, fw, bh), 0, caph + v->ch);
+}
+
 static void view_redraw(struct view *v) {
 	struct theme *t = theme_of(v->server, v->server->st_frames);
 	if (v->csd || v->fullscreen) {
 		for (int i = 0; i < 4; i++)
 			if (v->deco[i])
 				wlr_scene_node_set_enabled(&v->deco[i]->node, false);
+		place_content(v);
+		return;
+	}
+	if (w10(v)) {
+		view_redraw_w10(v);
 		place_content(v);
 		return;
 	}
@@ -1149,10 +1277,10 @@ static uint32_t border_edges(struct view *v, double lx, double ly) {
 		return 0; /* the app's own frame handles its resize edges */
 	int fw = view_frame_w(v), fh = v->ch + caption_h(v) + bottom_h(v);
 	uint32_t e = 0;
-	int bw = w7(v) ? W7_BORDER : BORDER;
+	int bw = w10(v) ? W10_SHADOW : w7(v) ? W7_BORDER : BORDER;
 	if (x < bw) e |= WLR_EDGE_LEFT;
 	if (x >= fw - bw) e |= WLR_EDGE_RIGHT;
-	if (y < (w7(v) ? 5 : BORDER)) e |= WLR_EDGE_TOP;
+	if (y < (w10(v) ? 4 : w7(v) ? 5 : BORDER)) e |= WLR_EDGE_TOP;
 	if (y >= fh - bw) e |= WLR_EDGE_BOTTOM;
 	return e;
 }
@@ -1292,6 +1420,16 @@ static cairo_surface_t *capture_box(struct wlr_scene_node *root, int rx, int ry,
 	cairo_destroy(cr);
 	cairo_surface_set_device_scale(s, 1, 1);
 	return s;
+}
+
+/* a picture of a window as it is now (even minimised), for Task View */
+cairo_surface_t *view_snapshot(struct view *v) {
+	bool was = v->tree->node.enabled;
+	wlr_scene_node_set_enabled(&v->tree->node, true);
+	int fw = view_frame_w(v), fh = caption_h(v) + v->ch + bottom_h(v);
+	cairo_surface_t *c = capture_box(&v->tree->node, 0, 0, (struct wlr_box){0, 0, fw, fh});
+	wlr_scene_node_set_enabled(&v->tree->node, was);
+	return c;
 }
 
 struct png_buf {
@@ -1873,6 +2011,18 @@ static bool handle_binding(struct server *s, xkb_keysym_t sym, uint32_t mods) {
 	case XKB_KEY_XF86MonBrightnessUp: shell_brightness_key(s->shell, 5); return true;
 	case XKB_KEY_XF86MonBrightnessDown: shell_brightness_key(s->shell, -5); return true;
 	}
+	if (sym == XKB_KEY_Escape && shell_overlay_open(s->shell)) {
+		shell_close_overlays(s->shell);
+		return true;
+	}
+	if ((mods & WLR_MODIFIER_LOGO) && sym == XKB_KEY_Tab) {
+		shell_task_view(s->shell);
+		return true;
+	}
+	if ((mods & WLR_MODIFIER_LOGO) && (sym == XKB_KEY_a || sym == XKB_KEY_A)) {
+		shell_action_center(s->shell, true);
+		return true;
+	}
 	if (sym == XKB_KEY_Escape && shell_start_open(s->shell)) {
 		shell_toggle_start(s->shell);
 		return true;
@@ -2280,6 +2430,8 @@ static const char *default_assets(void) {
 static int conf_style(const char *v) {
 	if (!strcasecmp(v, "7") || !strcasecmp(v, "win7") || !strcasecmp(v, "windows7"))
 		return 7;
+	if (!strcasecmp(v, "10") || !strcasecmp(v, "win10") || !strcasecmp(v, "windows10"))
+		return 10;
 	if (!strcasecmp(v, "xp") || !strcasecmp(v, "classic"))
 		return 0;
 	return -1;
@@ -2307,11 +2459,12 @@ static void resolve_styles(struct server *s, bool wall_set) {
 	int *parts[] = {&s->st_frames, &s->st_taskbar, &s->st_start, &s->st_logon, &s->st_sounds, &s->st_cursors,
 		&s->st_icons};
 	for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++)
-		if (*parts[i] < 0 || (*parts[i] == 7 && !s->have7) || (*parts[i] == 0 && !s->have_xp))
+		if (*parts[i] < 0 || (*parts[i] == 7 && !s->have7) || (*parts[i] == 10 && !s->have10) ||
+				(*parts[i] == 0 && !s->have_xp))
 			*parts[i] = s->style;
 	/* each version opens on its own default wallpaper */
 	if (!wall_set)
-		snprintf(s->opt_wallpaper, sizeof(s->opt_wallpaper), "%s", s->style == 7 ? "Windows 7.jpg" : "Bliss.jpg");
+		snprintf(s->opt_wallpaper, sizeof(s->opt_wallpaper), "%s", s->style == 10 ? "Windows 10.jpg" : s->style == 7 ? "Windows 7.jpg" : "Bliss.jpg");
 }
 
 static void load_config(struct server *s) {
@@ -2333,6 +2486,11 @@ static void load_config(struct server *s) {
 	s->style = s->have_xp ? 0 : 7;
 	s->st_frames = s->st_taskbar = s->st_start = s->st_logon = s->st_sounds = s->st_cursors = s->st_icons = -1;
 	s->opt_glass = true;
+	/* Windows 10's defaults: blue accent, dark taskbar and Start, transparency on */
+	s->accent_rgb = 0x0078d7;
+	s->opt_dark = true;
+	s->opt_transparency = true;
+	s->opt_accent_titlebars = false;
 	s->glass_rgb = 0x74b8fc;
 	s->glass_intensity = 45;
 	bool wall_set = false;
@@ -2381,7 +2539,18 @@ static void load_config(struct server *s) {
 			wall_set = true;
 		}
 		else if (!strcmp(key, "style"))
-			s->style = conf_style(val) == 7 && s->have7 ? 7 : s->have_xp ? 0 : 7;
+		{
+			int st = conf_style(val);
+			s->style = st == 7 && s->have7 ? 7 : st == 10 && s->have10 ? 10 : s->have_xp ? 0 : s->have7 ? 7 : 10;
+		}
+		else if (!strcmp(key, "accent_color"))
+			s->accent_rgb = conf_color(val);
+		else if (!strcmp(key, "dark_mode"))
+			s->opt_dark = conf_true(val);
+		else if (!strcmp(key, "transparency"))
+			s->opt_transparency = conf_true(val);
+		else if (!strcmp(key, "accent_titlebars"))
+			s->opt_accent_titlebars = conf_true(val);
 		else if (!strcmp(key, "glass"))
 			s->opt_glass = conf_true(val);
 		else if (!strcmp(key, "glass_color"))
@@ -2451,11 +2620,35 @@ static void apply_desktop(struct server *s) {
 	char path[1024];
 	const char *wall = s->opt_wallpaper;
 	if (*wall && wall[0] != '/') {
+		/* a wallpaper from any version's folder */
+		struct theme *all[3] = {t, &s->theme, &s->theme7};
 		snprintf(path, sizeof(path), "%s/wallpapers/%s", t->dir, wall);
-		if (access(path, R_OK) != 0 && other->dir[0]) {
-			snprintf(path, sizeof(path), "%s/wallpapers/%s", other->dir, wall);
-			if (access(path, R_OK) == 0)
-				wall = path;
+		bool found = access(path, R_OK) == 0;
+		struct theme *extra[2] = {&s->theme10, other};
+		for (int i = 0; i < 2 && !found; i++)
+			if (extra[i]->dir[0]) {
+				snprintf(path, sizeof(path), "%s/wallpapers/%s", extra[i]->dir, wall);
+				if ((found = access(path, R_OK) == 0))
+					wall = path;
+			}
+		(void)all;
+		if (!strcmp(wall, "Windows 10.jpg") && t->version == 10) {
+			/* Windows ships its hero picture for each screen shape: take the closest */
+			int sw, sh;
+			server_screen(s, &sw, &sh);
+			static const int shapes[][2] = {{3840, 2160}, {2560, 1600}, {1366, 768}, {1024, 768}, {1200, 1920},
+				{768, 1024}, {768, 1366}, {1600, 2560}, {2160, 3840}};
+			double want = (double)sw / sh, best = 9;
+			for (size_t i = 0; i < sizeof(shapes) / sizeof(*shapes); i++) {
+				double d = fabs((double)shapes[i][0] / shapes[i][1] - want);
+				char p[1024];
+				snprintf(p, sizeof(p), "%s/wallpapers/.hero-%dx%d.jpg", t->dir, shapes[i][0], shapes[i][1]);
+				if (d < best - 0.01 && access(p, R_OK) == 0) {
+					best = d;
+					snprintf(path, sizeof(path), "%s", p);
+					wall = path;
+				}
+			}
 		}
 	}
 	theme_set_wallpaper(t, wall, s->opt_wallpaper_style);
@@ -2477,7 +2670,7 @@ static void apply_desktop(struct server *s) {
 
 /* pointers and the GTK theme for apps started from now on */
 static void apply_env(struct server *s) {
-	const char *cur = s->st_cursors == 7 ? "expede-7" : "expede-xp";
+	const char *cur = s->st_cursors == 10 ? "expede-10" : s->st_cursors == 7 ? "expede-7" : "expede-xp";
 	setenv("XCURSOR_THEME", cur, true);
 	if (strcmp(cur, s->cursor_theme)) {
 		snprintf(s->cursor_theme, sizeof(s->cursor_theme), "%s", cur);
@@ -2488,7 +2681,7 @@ static void apply_env(struct server *s) {
 		}
 	}
 	if (s->own_gtk_theme)
-		setenv("GTK_THEME", s->style == 7 ? "Expede-7" : "Expede-XP", true);
+		setenv("GTK_THEME", s->style == 10 ? "Expede-10" : s->style == 7 ? "Expede-7" : "Expede-XP", true);
 }
 
 /* expede-settings sends SIGHUP after saving, so changes apply without logging off */
@@ -2632,13 +2825,18 @@ int main(int argc, char *argv[]) {
 		snprintf(slash + 1, sizeof(dir7) - (slash + 1 - dir7), "7");
 	s.have_xp = theme_load(&s.theme, default_assets());
 	s.have7 = theme_load(&s.theme7, dir7) && s.theme7.version == 7;
-	if (!s.have_xp && !s.have7)
+	char dir10[600];
+	snprintf(dir10, sizeof(dir10), "%s", dir7);
+	if ((slash = strrchr(dir10, '/')))
+		snprintf(slash + 1, sizeof(dir10) - (slash + 1 - dir10), "10");
+	s.have10 = theme_load(&s.theme10, dir10) && s.theme10.version == 10;
+	if (!s.have_xp && !s.have7 && !s.have10)
 		return 1;
 	load_config(&s);
 	/* the pointers each rip turned into Xcursor themes; exported so client-drawn cursors match */
 	char cpath[1400];
 	const char *old = getenv("XCURSOR_PATH");
-	snprintf(cpath, sizeof(cpath), "%s/cursors:%s/cursors:%s", default_assets(), dir7,
+	snprintf(cpath, sizeof(cpath), "%s/cursors:%s/cursors:%s/cursors:%s", default_assets(), dir7, dir10,
 		old ? old : "/usr/share/icons:/usr/share/pixmaps");
 	setenv("XCURSOR_PATH", cpath, true);
 	setenv("XCURSOR_SIZE", "32", true);

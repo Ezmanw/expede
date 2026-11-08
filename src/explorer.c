@@ -980,7 +980,7 @@ static void w7_cmd_btn(struct ui_win *w, cairo_t *cr, int id, int *x, int y, con
 }
 
 static void paint_toolbar(struct ui_win *w, cairo_t *cr) {
-	if (ui_theme.version == 7) {
+	if (ui_theme.version >= 7) {
 		int nh = 35;
 		if (ui_theme.w7_nav_bg.s)
 			draw_image(cr, &ui_theme.w7_nav_bg, 0, 0, 0, w->w, nh);
@@ -1145,7 +1145,7 @@ static void paint_toolbar(struct ui_win *w, cairo_t *cr) {
 }
 
 static void paint_address(struct ui_win *w, cairo_t *cr) {
-	if (ui_theme.version == 7) {
+	if (ui_theme.version >= 7) {
 		/* Windows 7 Aero Command Bar (35..64) */
 		int y = 35, ch = TB_H + AB_H - y;
 		if (ui_theme.w7_cmd_bar.s)
@@ -1450,7 +1450,7 @@ static void paint_nav7(struct ui_win *w, cairo_t *cr, int top, int bottom) {
 }
 
 static void paint_tree(struct ui_win *w, cairo_t *cr, int top, int bottom) {
-	if (ui_theme.version == 7) {
+	if (ui_theme.version >= 7) {
 		paint_nav7(w, cr, top, bottom);
 		return;
 	}
@@ -1505,7 +1505,7 @@ static void paint_item(struct ui_win *w, cairo_t *cr, int i, int ox, int oy) {
 	struct ui_rect b = e->box;
 	int x = ox + b.x, y = oy + b.y;
 	bool sel = e->selected, hot = w->hot == ID_ITEM + i, renaming = ex.focus == F_RENAME && ex.rename_index == i;
-	bool w7 = ui_theme.version == 7;
+	bool w7 = ui_theme.version >= 7;
 	struct icon_cache *ic = icon(e->icon);
 	uint32_t hl = 0x316ac5;
 	if (w7 && (sel || hot) && !renaming) {
@@ -1596,7 +1596,7 @@ static void paint_item(struct ui_win *w, cairo_t *cr, int i, int ox, int oy) {
 }
 
 static void paint_content(struct ui_win *w, cairo_t *cr) {
-	bool w7 = ui_theme.version == 7;
+	bool w7 = ui_theme.version >= 7;
 	struct ui_rect c = content_box();
 	layout();
 	ui_fill(cr, c.x, c.y, c.w, c.h, 0xffffff);
@@ -1679,7 +1679,7 @@ static void paint_content(struct ui_win *w, cairo_t *cr) {
 
 static void paint_status(struct ui_win *w, cairo_t *cr) {
 	int y = w->h - STATUS_H;
-	if (ui_theme.version == 7) {
+	if (ui_theme.version >= 7) {
 		if (ui_theme.w7_details_bg.s)
 			draw_image(cr, &ui_theme.w7_details_bg, 0, 0, y, w->w, STATUS_H);
 		else
@@ -1794,7 +1794,7 @@ static void paint_dialog(struct ui_win *w, cairo_t *cr) {
 	int x = (w->w - dw) / 2, y = (w->h - dh) / 2;
 	ui_reg(w, ID_DLG_CANCEL - 100, 0, 0, w->w, w->h); /* modal: swallow clicks elsewhere */
 	const char *title = ex.dialog == D_PROPERTIES ? "Properties" : ex.dialog == D_ERROR ? "Error" : "Confirm Delete";
-	if (ui_theme.version == 7) {
+	if (ui_theme.version >= 7) {
 		ui_fill(cr, x - 4, y - 28, dw + 8, dh + 32, 0x556677);
 		ui_fill(cr, x - 3, y - 27, dw + 6, 30, 0xd8e6f6);
 		ui_text(cr, "Segoe UI 9", title, x + 6, y - 20, 0, 0x000000);
@@ -1823,7 +1823,7 @@ static void paint(struct ui_win *w, cairo_t *cr) {
 	paint_toolbar(w, cr);
 	paint_address(w, cr);
 	int top = TB_H + AB_H, bottom = w->h - STATUS_H;
-	if (ui_theme.version == 7) {
+	if (ui_theme.version >= 7) {
 		paint_nav7(w, cr, top, bottom);
 	} else if (ex.search_mode) {
 		paint_search_pane(w, cr, top, bottom);
@@ -2065,7 +2065,7 @@ static void on_button(struct ui_win *w, int id, int button, bool pressed, double
 	case ID_SYS_PROPS: spawn("expede-settings system"); break;
 	case ID_UNINSTALL_PROGS: spawn("expede-settings programs"); break;
 	case ID_GO: {
-		if (ui_theme.version == 7 && ex.focus != F_ADDR) {
+		if (ui_theme.version >= 7 && ex.focus != F_ADDR) {
 			reload();
 			break;
 		}
@@ -2090,7 +2090,7 @@ static void on_button(struct ui_win *w, int id, int button, bool pressed, double
 	case ID_VIEWS:
 		ex.menu = M_VIEWS;
 		ex.menu_x = x - 20;
-		ex.menu_y = ui_theme.version == 7 ? TB_H + AB_H - 2 : TB_H - 2;
+		ex.menu_y = ui_theme.version >= 7 ? TB_H + AB_H - 2 : TB_H - 2;
 		break;
 	case ID_SEARCH_GO:
 		if (ex.query[0]) {
@@ -2102,7 +2102,7 @@ static void on_button(struct ui_win *w, int id, int button, bool pressed, double
 			ex.view = V_DETAILS;
 			ex.focus = F_NONE;
 			reload();
-			if (ui_theme.version != 7)
+			if (ui_theme.version < 7)
 				ex.search_mode = true;
 		}
 		break;
@@ -2123,7 +2123,7 @@ static void on_motion(struct ui_win *w, double x, double y, bool held) {
 }
 
 static void on_scroll(struct ui_win *w, double dy, double x, double y) {
-	if ((ex.tree_mode || ui_theme.version == 7) && x < PANE_W) {
+	if ((ex.tree_mode || ui_theme.version >= 7) && x < PANE_W) {
 		ex.tree_scroll += dy > 0 ? 54 : -54;
 		if (ex.tree_scroll < 0)
 			ex.tree_scroll = 0;

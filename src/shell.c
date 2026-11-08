@@ -102,6 +102,22 @@ struct shell {
 	bool bat_open, bright_drag, bright_hw;
 	int bright_pct;
 	struct wlr_box bat_icon_box; /* taskbar coords */
+	/* Windows 10: the search box, Task View and Action Center buttons (taskbar coords) */
+	struct wlr_box search_box10, taskview_box, action_box;
+	bool search_hot, taskview_hot, action_hot;
+	/* Task View */
+	bool tv_open;
+	struct wlr_scene_buffer *tv_node;
+	struct { struct view *view; cairo_surface_t *shot; struct wlr_box box, close; } tv[32];
+	int n_tv, tv_hot;
+	bool tv_close_hot;
+	/* Action Center */
+	bool action_open;
+	struct wlr_scene_buffer *ac_node, *ac_glass;
+	struct wlr_box ac_tiles[8], ac_bright;
+	bool ac_on[8];
+	int ac_hot, ac_bright_pct;
+	bool ac_bright_drag;
 	struct wlr_box bat_box;      /* layout coords */
 	struct wlr_scene_buffer *batpop;
 	struct wlr_scene_rect *bright_veil;
@@ -158,11 +174,12 @@ static void fill(cairo_t *cr, double x, double y, double w, double h, uint32_t r
 static struct theme *bar_theme(struct shell *sh) { return theme_of(sh->server, sh->server->st_taskbar); }
 static struct theme *menu_theme(struct shell *sh) { return theme_of(sh->server, sh->server->st_start); }
 static struct theme *desk_theme(struct shell *sh) { return theme_of(sh->server, sh->server->st_icons); }
-static bool bar7(struct shell *sh) { return bar_theme(sh)->version == 7; }
-static bool menu7(struct shell *sh) { return menu_theme(sh)->version == 7; }
-static bool desk7(struct shell *sh) { return desk_theme(sh)->version == 7; }
+static bool bar7(struct shell *sh) { return bar_theme(sh)->version >= 7; }
+static bool menu7(struct shell *sh) { return menu_theme(sh)->version >= 7; }
+static bool desk7(struct shell *sh) { return desk_theme(sh)->version >= 7; }
 static int bar_h(struct shell *sh) { return taskbar_h(sh->server); }
-static int start_w(struct shell *sh) { return bar7(sh) ? W7_ORB + 2 : START_W; }
+static bool bar10(struct shell *sh) { return bar_theme(sh)->version == 10; }
+static int start_w(struct shell *sh) { return bar10(sh) ? 48 : bar7(sh) ? W7_ORB + 2 : START_W; }
 static int menu_w(struct shell *sh) { return menu7(sh) ? W7_MENU_W : MENU_W; }
 
 /* Windows 7 hover: a pale blue rounded box */
@@ -622,7 +639,166 @@ static void draw_taskbar7(struct shell *sh) {
 		wlr_scene_node_place_below(&sh->bar_glass->node, &sh->taskbar->node);
 }
 
+/* Windows 10's flag: four flat panes, the right ones a little taller (it leans in) */
+static void draw_win10_logo(cairo_t *cr, double x, double y, double size, uint32_t rgb) {
+	double g = size * 0.06, half = (size - g) / 2, lean = size * 0.08;
+	cairo_set_source_rgb(cr, ((rgb >> 16) & 255) / 255.0, ((rgb >> 8) & 255) / 255.0, (rgb & 255) / 255.0);
+	double xs[2] = {x, x + half + g}, ys[2] = {y, y + half + g};
+	for (int c = 0; c < 2; c++)
+		for (int r = 0; r < 2; r++) {
+			double x0 = xs[c], x1 = xs[c] + half;
+			double l = lean * (1 - c * 1.0), rr = lean * (1 - c - 1.0) + lean;
+			double t0 = ys[r] + (r ? 0 : lean - l * 0), b0 = ys[r] + half;
+			(void)rr;
+			/* left column sits lower at the top edge than the right one */
+			double top_l = r ? ys[r] : y + lean * (c ? 0.5 : 1), top_r = r ? ys[r] : y + lean * (c ? 0 : 0.5);
+			double bot_l = r ? y + size - lean * (c ? 0.5 : 1) : b0, bot_r = r ? y + size - lean * (c ? 0 : 0.5) : b0;
+			(void)t0;
+			cairo_move_to(cr, x0, top_l);
+			cairo_line_to(cr, x1, top_r);
+			cairo_line_to(cr, x1, bot_r);
+			cairo_line_to(cr, x0, bot_l);
+			cairo_close_path(cr);
+			cairo_fill(cr);
+		}
+}
+
+/* Windows 10's taskbar: dark acrylic, the Start flag, the search box, Task View,
+ * square icon buttons with a light line under running apps, the tray in MDL2 glyphs */
+static void draw_taskbar10(struct shell *sh) {
+	struct server *srv = sh->server;
+	struct theme *t = bar_theme(sh);
+	theme_use_fonts(t);
+	int bh = bar_h(sh);
+	bool dark = srv->opt_dark;
+	uint32_t fg = dark ? 0xffffff : 0x000000;
+	double hov = dark ? 1 : 0; /* hover tint: white on dark, black on light */
+	cairo_surface_t *s = canvas_new(sh->w, bh);
+	cairo_t *cr = cairo_create(s);
+	bool acrylic = srv->opt_transparency && srv->glass_buf;
+	if (dark)
+		cairo_set_source_rgba(cr, 0.06, 0.06, 0.06, acrylic ? 0.85 : 1);
+	else
+		cairo_set_source_rgba(cr, 0.93, 0.93, 0.93, acrylic ? 0.85 : 1);
+	cairo_paint(cr);
+
+	/* Start */
+	if (sh->start_open || sh->start_hot) {
+		cairo_set_source_rgba(cr, hov, hov, hov, sh->start_open ? 0.15 : 0.1);
+		cairo_rectangle(cr, 0, 0, 48, bh);
+		cairo_fill(cr);
+	}
+	draw_win10_logo(cr, 16, (bh - 16) / 2.0, 16, sh->start_hot && !sh->start_open ? srv->accent_rgb : fg);
+	/* "Type here to search" */
+	int sw = sh->w >= 1100 ? 344 : 0;
+	sh->search_box10 = (struct wlr_box){48, 0, sw, bh};
+	if (sw) {
+		cairo_set_source_rgb(cr, sh->search_hot ? 1 : 0.95, sh->search_hot ? 1 : 0.95, sh->search_hot ? 1 : 0.95);
+		cairo_rectangle(cr, 48, 0, sw, bh);
+		cairo_fill(cr);
+		draw_mdl2(cr, "\uE721", 10, 48 + 22, bh / 2.0, 0x000000);
+		draw_text(cr, "Segoe UI 9", "Type here to search", 48 + 42, (bh - 16) / 2, sw - 50, 0x6b6b6b, 0, 0, 0, false);
+	} else {
+		sh->search_box10 = (struct wlr_box){48, 0, 48, bh};
+		if (sh->search_hot) {
+			cairo_set_source_rgba(cr, hov, hov, hov, 0.1);
+			cairo_rectangle(cr, 48, 0, 48, bh);
+			cairo_fill(cr);
+		}
+		draw_mdl2(cr, "\uE721", 11, 48 + 24, bh / 2.0, fg);
+	}
+	int x = 48 + sh->search_box10.width;
+	sh->taskview_box = (struct wlr_box){x, 0, 48, bh};
+	if (sh->taskview_hot) {
+		cairo_set_source_rgba(cr, hov, hov, hov, 0.1);
+		cairo_rectangle(cr, x, 0, 48, bh);
+		cairo_fill(cr);
+	}
+	draw_mdl2(cr, "\uE7C4", 11, x + 24, bh / 2.0, fg);
+	x += 48;
+
+	/* tray, right to left: Show desktop sliver, Action Center, clock, battery, network, volume, ^ */
+	sh->showdesk_box = (struct wlr_box){sh->w - 5, 0, 5, bh};
+	cairo_set_source_rgba(cr, hov, hov, hov, sh->showdesk_hot ? 0.25 : 0.12);
+	cairo_rectangle(cr, sh->w - 5, 0, 1, bh);
+	cairo_fill(cr);
+	int tx = sh->w - 5 - 48;
+	sh->action_box = (struct wlr_box){tx, 0, 48, bh};
+	if (sh->action_hot) {
+		cairo_set_source_rgba(cr, hov, hov, hov, 0.1);
+		cairo_rectangle(cr, tx, 0, 48, bh);
+		cairo_fill(cr);
+	}
+	draw_mdl2(cr, "\uE91C", 11, tx + 24, bh / 2.0, fg);
+	int cw = text_width("Segoe UI 9", sh->clock), dw = text_width("Segoe UI 9", sh->date);
+	int clock_w = (cw > dw ? cw : dw) + 16;
+	tx -= clock_w;
+	draw_text(cr, "Segoe UI 9", sh->clock, tx + (clock_w - cw) / 2, 4, 0, fg, 0, 0, 0, false);
+	draw_text(cr, "Segoe UI 9", sh->date, tx + (clock_w - dw) / 2, 20, 0, fg, 0, 0, 0, false);
+	if (sh->bat_pct >= 0) {
+		tx -= 24;
+		sh->bat_icon_box = (struct wlr_box){tx, 0, 24, bh};
+		/* battery glyphs E850 (empty) .. E859 (full); E85A.. while charging */
+		int lvl = sh->bat_pct >= 100 ? 9 : sh->bat_pct / 10;
+		char g[8];
+		unsigned cp = (sh->bat_charging ? 0xE85A : 0xE850) + lvl;
+		snprintf(g, sizeof(g), "%c%c%c", 0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 63), 0x80 | (cp & 63));
+		draw_mdl2(cr, g, 10, tx + 12, bh / 2.0, fg);
+	} else {
+		sh->bat_icon_box = (struct wlr_box){0, 0, 0, 0};
+	}
+	tx -= 24;
+	sh->net_icon_box = (struct wlr_box){tx, 0, 24, bh};
+	draw_mdl2(cr, "\uE701", 10, tx + 12, bh / 2.0, fg);
+	if (sh->vol_ok) {
+		tx -= 24;
+		sh->vol_icon_box = (struct wlr_box){tx, 0, 24, bh};
+		static const char *vg[4] = {"\uE992", "\uE993", "\uE994", "\uE995"};
+		const char *g = sh->vol_muted ? "\uE74F" : vg[sh->vol_pct <= 0 ? 0 : sh->vol_pct < 34 ? 1 : sh->vol_pct < 67 ? 2 : 3];
+		draw_mdl2(cr, g, 10, tx + 12, bh / 2.0, fg);
+	}
+	tx -= 24;
+	draw_mdl2(cr, "\uE70E", 8, tx + 12, bh / 2.0, fg);
+
+	/* task buttons: 48 wide, a 2px accent-light line under running apps */
+	int avail = tx - x - 8;
+	int bw = sh->n_tasks && avail / sh->n_tasks < 48 ? avail / sh->n_tasks : 48;
+	uint32_t line = srv->accent_rgb;
+	for (int i = 0; i < sh->n_tasks; i++) {
+		struct task *k = &sh->tasks[i];
+		k->box = (struct wlr_box){x + i * bw, 0, bw, bh};
+		bool act = k->view->active && !k->view->minimized, hot = i == sh->task_hot;
+		if (act || hot) {
+			cairo_set_source_rgba(cr, hov, hov, hov, act && hot ? 0.2 : act ? 0.13 : 0.1);
+			cairo_rectangle(cr, k->box.x, 0, bw, bh);
+			cairo_fill(cr);
+		}
+		double inset = act ? 0 : 4;
+		cairo_set_source_rgb(cr, ((line >> 16) & 255) / 255.0 * 0.5 + 0.5, ((line >> 8) & 255) / 255.0 * 0.5 + 0.5,
+			(line & 255) / 255.0 * 0.5 + 0.5);
+		cairo_rectangle(cr, k->box.x + inset, bh - 2, bw - 2 * inset, 2);
+		cairo_fill(cr);
+		struct icon_set *ic = &k->view->icon;
+		cairo_surface_t *img = ic->s32 ? ic->s32 : ic->s16;
+		if (img)
+			draw_scaled(cr, img, k->box.x + (bw - 24) / 2.0, (bh - 24) / 2.0, 24);
+	}
+	cairo_destroy(cr);
+	show(&sh->taskbar, srv->layer_shell, s, 0, sh->h - bh);
+	if (acrylic) {
+		glass_backdrop(srv, &sh->bar_glass, srv->layer_shell, 0, sh->h - bh, 0, sh->h - bh, sh->w, bh);
+		if (sh->bar_glass)
+			wlr_scene_node_place_below(&sh->bar_glass->node, &sh->taskbar->node);
+	} else if (sh->bar_glass) {
+		wlr_scene_node_set_enabled(&sh->bar_glass->node, false);
+	}
+}
+
 static void draw_taskbar(struct shell *sh) {
+	if (bar10(sh)) {
+		draw_taskbar10(sh);
+		return;
+	}
 	if (bar7(sh)) {
 		draw_taskbar7(sh);
 		return;
@@ -998,7 +1174,7 @@ static void draw_volpop(struct shell *sh) {
 		draw_image(cr, &t->slider_thumb, sh->vol_drag ? 2 : 0, cx - 10, ty, 21, 11);
 
 		/* Mute checkbox: unchecked frames 0-3, checked 4-7 */
-		draw_frame_true(cr, t->checkbox, t->version == 7 ? 20 : 12, sh->vol_muted ? 4 : 0, 12, vh - 28);
+		draw_frame_true(cr, t->checkbox, t->version >= 7 ? 20 : 12, sh->vol_muted ? 4 : 0, 12, vh - 28);
 		draw_text(cr, "Tahoma 8", "Mute", 31, vh - 28, 0, 0x000000, 0, 0, 0, true);
 	}
 	cairo_destroy(cr);
@@ -1632,8 +1808,17 @@ static void launch_app(struct shell *sh, int app_index) {
 	free(cmd);
 }
 
+static bool tv_motion(struct shell *sh, double x, double y);
+static bool tv_button(struct shell *sh, double x, double y, bool pressed);
+static bool ac_motion(struct shell *sh, double x, double y);
+static bool ac_button(struct shell *sh, double x, double y, bool pressed);
+
 bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 	(void)over_view;
+	if (sh->tv_open)
+		return tv_motion(sh, x, y);
+	if (sh->action_open && ac_motion(sh, x, y))
+		return true;
 	if (sh->vol_drag) {
 		vol_drag_to(sh, y);
 		return true;
@@ -1695,19 +1880,28 @@ bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 	}
 	bool on_bar = y >= sh->h - bar_h(sh);
 	int task_hot = -1;
-	bool start_hot = false, showdesk_hot = false;
+	bool start_hot = false, showdesk_hot = false, search_hot = false, taskview_hot = false, action_hot = false;
 	if (on_bar) {
 		double by = y - (sh->h - bar_h(sh));
 		start_hot = x < start_w(sh);
 		showdesk_hot = bar7(sh) && in_box(&sh->showdesk_box, x, by);
+		if (bar10(sh)) {
+			search_hot = in_box(&sh->search_box10, x, by);
+			taskview_hot = in_box(&sh->taskview_box, x, by);
+			action_hot = in_box(&sh->action_box, x, by);
+		}
 		for (int i = 0; i < sh->n_tasks; i++)
 			if (in_box(&sh->tasks[i].box, x, by))
 				task_hot = i;
 	}
-	if (task_hot != sh->task_hot || start_hot != sh->start_hot || showdesk_hot != sh->showdesk_hot) {
+	if (task_hot != sh->task_hot || start_hot != sh->start_hot || showdesk_hot != sh->showdesk_hot ||
+			search_hot != sh->search_hot || taskview_hot != sh->taskview_hot || action_hot != sh->action_hot) {
 		sh->task_hot = task_hot;
 		sh->start_hot = start_hot;
 		sh->showdesk_hot = showdesk_hot;
+		sh->search_hot = search_hot;
+		sh->taskview_hot = taskview_hot;
+		sh->action_hot = action_hot;
 		draw_taskbar(sh);
 	}
 	return on_bar;
@@ -1740,6 +1934,16 @@ static void activate_item(struct shell *sh, struct menu_item *m) {
 bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, bool over_view) {
 	struct wlr_box mb = menu_box(sh);
 	bool on_bar = y >= sh->h - bar_h(sh);
+	if (sh->tv_open && !on_bar)
+		return tv_button(sh, x, y, pressed);
+	if (sh->action_open) {
+		if (ac_button(sh, x, y, pressed))
+			return true;
+		/* a click anywhere else closes it (the Action Center button toggles it below) */
+		double by = y - (sh->h - bar_h(sh));
+		if (pressed && !(on_bar && in_box(&sh->action_box, x, by)))
+			shell_action_center(sh, false);
+	}
 	if (sh->bat_open || sh->bright_drag) {
 		if (sh->bright_drag && !pressed) {
 			sh->bright_drag = false;
@@ -1868,6 +2072,19 @@ bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, 
 			return true;
 		}
 		double by = y - (sh->h - bar_h(sh));
+		if (bar10(sh) && in_box(&sh->search_box10, x, by)) {
+			/* Windows 10 searches from Start: open it, ready to type */
+			shell_toggle_start(sh);
+			return true;
+		}
+		if (bar10(sh) && in_box(&sh->taskview_box, x, by)) {
+			shell_task_view(sh);
+			return true;
+		}
+		if (bar10(sh) && in_box(&sh->action_box, x, by)) {
+			shell_action_center(sh, !sh->action_open);
+			return true;
+		}
 		if (bar7(sh) && in_box(&sh->showdesk_box, x, by)) {
 			if (sh->start_open)
 				shell_toggle_start(sh);
@@ -2009,6 +2226,338 @@ bool shell_axis(struct shell *sh, double x, double y, double delta) {
 		if (sh->scroll < 0) sh->scroll = 0;
 		sh->list_hot = list_index_at(sh, x - mb.x, y - mb.y);
 		draw_menu(sh);
+	}
+	return true;
+}
+
+/* ---------------------------------------------------------------- Windows 10: Task View */
+
+static void tv_free(struct shell *sh) {
+	for (int i = 0; i < sh->n_tv; i++)
+		if (sh->tv[i].shot)
+			cairo_surface_destroy(sh->tv[i].shot);
+	sh->n_tv = 0;
+}
+
+static void draw_task_view(struct shell *sh) {
+	if (!sh->tv_open) {
+		if (sh->tv_node)
+			wlr_scene_node_set_enabled(&sh->tv_node->node, false);
+		return;
+	}
+	struct server *srv = sh->server;
+	theme_use_fonts(bar_theme(sh));
+	int h = sh->h - bar_h(sh);
+	cairo_surface_t *c = canvas_new(sh->w, h);
+	cairo_t *cr = cairo_create(c);
+	/* the desktop, dimmed and blurred, behind the windows */
+	cairo_set_source_rgba(cr, 0.12, 0.12, 0.12, srv->opt_transparency ? 0.75 : 0.97);
+	cairo_paint(cr);
+	if (!sh->n_tv)
+		draw_text(cr, "Segoe UI Light 20", "No apps open", sh->w / 2 - 70, h / 2 - 20, 0, 0xffffff, 0, 0, 0, false);
+	for (int i = 0; i < sh->n_tv; i++) {
+		struct wlr_box b = sh->tv[i].box;
+		bool hot = i == sh->tv_hot;
+		const char *title = sh->tv[i].view->xt->title ? sh->tv[i].view->xt->title : "";
+		if (sh->tv[i].view->icon.s16)
+			draw_surface(cr, sh->tv[i].view->icon.s16, b.x, b.y - 24);
+		draw_text(cr, "Segoe UI 9", title, b.x + 22, b.y - 24, b.width - 52, 0xffffff, 0, 0, 0, false);
+		if (hot) {
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.6);
+			cairo_rectangle(cr, b.x - 3, b.y - 3, b.width + 6, b.height + 6);
+			cairo_fill(cr);
+			/* the close button Task View shows on the hovered window */
+			struct wlr_box x = sh->tv[i].close;
+			cairo_set_source_rgb(cr, sh->tv_close_hot ? 0.91 : 0.2, sh->tv_close_hot ? 0.07 : 0.2, sh->tv_close_hot ? 0.14 : 0.2);
+			cairo_rectangle(cr, x.x, x.y, x.width, x.height);
+			cairo_fill(cr);
+			draw_mdl2(cr, "\uE8BB", 7.5, x.x + x.width / 2.0, x.y + x.height / 2.0, 0xffffff);
+		}
+		cairo_surface_t *shot = sh->tv[i].shot;
+		if (shot) {
+			double sw = cairo_image_surface_get_width(shot), shh = cairo_image_surface_get_height(shot);
+			cairo_save(cr);
+			cairo_translate(cr, b.x, b.y);
+			cairo_scale(cr, b.width / sw, b.height / shh);
+			cairo_set_source_surface(cr, shot, 0, 0);
+			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+			cairo_paint(cr);
+			cairo_restore(cr);
+		}
+	}
+	cairo_destroy(cr);
+	show(&sh->tv_node, srv->layer_menu, c, 0, 0);
+	wlr_scene_node_set_enabled(&sh->tv_node->node, true);
+}
+
+/* lay the windows out in rows like Windows 10, each as big as fits */
+static void tv_layout(struct shell *sh) {
+	int n = sh->n_tv;
+	if (!n)
+		return;
+	int area_w = sh->w - 80, area_h = sh->h - bar_h(sh) - 100;
+	int cols = 1;
+	while (cols * cols < n)
+		cols++;
+	int rows = (n + cols - 1) / cols;
+	int cw = area_w / cols, ch = area_h / rows;
+	for (int i = 0; i < n; i++) {
+		cairo_surface_t *shot = sh->tv[i].shot;
+		double sw = shot ? cairo_image_surface_get_width(shot) : 4, shh = shot ? cairo_image_surface_get_height(shot) : 3;
+		double k = fmin((cw - 40) / sw, (ch - 60) / shh);
+		if (k > 0.6 * ui_scale)
+			k = 0.6 * ui_scale;
+		int w = (int)(sw * k), h = (int)(shh * k);
+		int r = i / cols, c = i % cols, in_row = r == rows - 1 ? n - r * cols : cols;
+		int x0 = (sh->w - in_row * cw) / 2;
+		int x = x0 + c * cw + (cw - w) / 2, y = 60 + r * ch + (ch - h) / 2 + 12;
+		sh->tv[i].box = (struct wlr_box){x, y, w, h};
+		sh->tv[i].close = (struct wlr_box){x + w - 32, y - 32, 32, 30};
+	}
+}
+
+void shell_task_view(struct shell *sh) {
+	if (sh->tv_open) {
+		sh->tv_open = false;
+		tv_free(sh);
+		draw_task_view(sh);
+		return;
+	}
+	if (sh->start_open)
+		shell_toggle_start(sh);
+	shell_action_center(sh, false);
+	tv_free(sh);
+	for (int i = 0; i < sh->n_tasks && sh->n_tv < 32; i++) {
+		sh->tv[sh->n_tv].view = sh->tasks[i].view;
+		sh->tv[sh->n_tv].shot = view_snapshot(sh->tasks[i].view);
+		sh->n_tv++;
+	}
+	sh->tv_open = true;
+	sh->tv_hot = -1;
+	tv_layout(sh);
+	draw_task_view(sh);
+}
+
+static bool tv_motion(struct shell *sh, double x, double y) {
+	int hot = -1;
+	bool close_hot = false;
+	for (int i = 0; i < sh->n_tv; i++) {
+		struct wlr_box b = sh->tv[i].box;
+		b.y -= 32;
+		b.height += 32;
+		if (in_box(&b, x, y)) {
+			hot = i;
+			close_hot = in_box(&sh->tv[i].close, x, y);
+		}
+	}
+	if (hot != sh->tv_hot || close_hot != sh->tv_close_hot) {
+		sh->tv_hot = hot;
+		sh->tv_close_hot = close_hot;
+		draw_task_view(sh);
+	}
+	return true;
+}
+
+static bool tv_button(struct shell *sh, double x, double y, bool pressed) {
+	if (pressed)
+		return true;
+	tv_motion(sh, x, y);
+	int i = sh->tv_hot;
+	if (i >= 0 && sh->tv_close_hot) {
+		view_close(sh->tv[i].view);
+		return true;
+	}
+	struct view *v = i >= 0 ? sh->tv[i].view : NULL;
+	shell_task_view(sh); /* closes it */
+	if (v) {
+		if (v->minimized)
+			view_set_minimized(v, false);
+		view_focus(v);
+	}
+	return true;
+}
+
+/* ---------------------------------------------------------------- Windows 10: Action Center */
+
+#define AC_W 396
+enum { AC_SAVER, AC_NETWORK, AC_SETTINGS, AC_BLUETOOTH, AC_WIFI, AC_AIRPLANE, AC_SNIP, AC_FOCUS };
+static const struct { const char *label, *glyph; } ac_tiles[8] = {
+	{"Battery saver", "\uE8BE"}, {"Network", "\uE839"}, {"All settings", "\uE713"}, {"Bluetooth", "\uE702"},
+	{"Wi-Fi", "\uE701"}, {"Airplane mode", "\uE709"}, {"Screen snip", "\uE7F8"}, {"Focus assist", "\uE708"},
+};
+
+static bool cmd_says(const char *cmd, const char *want) {
+	FILE *p = popen(cmd, "r");
+	char buf[256] = "";
+	if (p) {
+		size_t n = fread(buf, 1, sizeof(buf) - 1, p);
+		buf[n] = 0;
+		pclose(p);
+	}
+	return strstr(buf, want) != NULL;
+}
+
+static void ac_read_state(struct shell *sh) {
+	sh->ac_on[AC_SAVER] = cmd_says("powerprofilesctl get 2>/dev/null", "power-saver");
+	sh->ac_on[AC_BLUETOOTH] = cmd_says("bluetoothctl show 2>/dev/null", "Powered: yes");
+	sh->ac_on[AC_WIFI] = cmd_says("nmcli radio wifi 2>/dev/null", "enabled");
+	sh->ac_on[AC_AIRPLANE] = cmd_says("nmcli radio all 2>/dev/null", "disabled") && !sh->ac_on[AC_WIFI];
+	sh->ac_on[AC_FOCUS] = !sh->server->opt_sounds;
+	sh->ac_bright_pct = sh->bright_pct;
+}
+
+static void draw_action_center(struct shell *sh) {
+	struct server *srv = sh->server;
+	if (!sh->action_open) {
+		if (sh->ac_node)
+			wlr_scene_node_set_enabled(&sh->ac_node->node, false);
+		if (sh->ac_glass)
+			wlr_scene_node_set_enabled(&sh->ac_glass->node, false);
+		return;
+	}
+	theme_use_fonts(bar_theme(sh));
+	int h = sh->h - bar_h(sh), x0 = sh->w - AC_W;
+	cairo_surface_t *c = canvas_new(AC_W, h);
+	cairo_t *cr = cairo_create(c);
+	bool acrylic = srv->opt_transparency && srv->glass_buf;
+	cairo_set_source_rgba(cr, 0.12, 0.12, 0.12, acrylic ? 0.88 : 1);
+	cairo_paint(cr);
+	cairo_set_source_rgba(cr, 1, 1, 1, 0.12);
+	cairo_rectangle(cr, 0, 0, 1, h);
+	cairo_fill(cr);
+	uint32_t link = 0x99ebff;
+	draw_text(cr, "Segoe UI 9", "Manage notifications", AC_W - 16 - text_width("Segoe UI 9", "Manage notifications"), 12,
+		0, link, 0, 0, 0, false);
+	int nw = text_width("Segoe UI 11", "No new notifications");
+	draw_text(cr, "Segoe UI 11", "No new notifications", (AC_W - nw) / 2, 44, 0, 0xc8c8c8, 0, 0, 0, false);
+	/* quick actions: 4 across, accent when on */
+	int tw = (AC_W - 16 - 3 * 2) / 4, th = 58, ty = h - 16 - 40 - 2 * th - 2 - 24;
+	draw_text(cr, "Segoe UI 9", "Collapse", 16, ty - 22, 0, link, 0, 0, 0, false);
+	for (int i = 0; i < 8; i++) {
+		int x = 8 + (i % 4) * (tw + 2), y = ty + (i / 4) * (th + 2);
+		sh->ac_tiles[i] = (struct wlr_box){x0 + x, y, tw, th};
+		bool on = sh->ac_on[i], hot = i == sh->ac_hot;
+		uint32_t bg = on ? srv->accent_rgb : 0x3b3b3b;
+		cairo_set_source_rgb(cr, ((bg >> 16) & 255) / 255.0, ((bg >> 8) & 255) / 255.0, (bg & 255) / 255.0);
+		cairo_rectangle(cr, x, y, tw, th);
+		cairo_fill(cr);
+		if (hot) {
+			cairo_set_source_rgba(cr, 1, 1, 1, 0.5);
+			cairo_set_line_width(cr, 2);
+			cairo_rectangle(cr, x + 1, y + 1, tw - 2, th - 2);
+			cairo_stroke(cr);
+		}
+		draw_mdl2(cr, ac_tiles[i].glyph, 11, x + 18, y + 18, 0xffffff);
+		draw_text(cr, "Segoe UI 8", ac_tiles[i].label, x + 8, y + th - 22, tw - 12, 0xffffff, 0, 0, 0, false);
+	}
+	/* brightness */
+	int by = h - 40;
+	draw_mdl2(cr, "\uE706", 11, 26, by + 14, 0xffffff);
+	int sx = 48, sw = AC_W - 48 - 24;
+	sh->ac_bright = (struct wlr_box){x0 + sx, by, sw, 28};
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	cairo_rectangle(cr, sx, by + 13, sw, 2);
+	cairo_fill(cr);
+	int pos = sx + sw * sh->ac_bright_pct / 100;
+	cairo_set_source_rgb(cr, ((srv->accent_rgb >> 16) & 255) / 255.0, ((srv->accent_rgb >> 8) & 255) / 255.0,
+		(srv->accent_rgb & 255) / 255.0);
+	cairo_rectangle(cr, sx, by + 13, pos - sx, 2);
+	cairo_fill(cr);
+	cairo_rectangle(cr, pos - 4, by + 4, 8, 20);
+	cairo_fill(cr);
+	cairo_destroy(cr);
+	show(&sh->ac_node, srv->layer_menu, c, x0, 0);
+	wlr_scene_node_set_enabled(&sh->ac_node->node, true);
+	if (acrylic) {
+		glass_backdrop(srv, &sh->ac_glass, srv->layer_menu, x0, 0, x0, 0, AC_W, h);
+		if (sh->ac_glass)
+			wlr_scene_node_place_below(&sh->ac_glass->node, &sh->ac_node->node);
+	}
+}
+
+void shell_action_center(struct shell *sh, bool open) {
+	if (open == sh->action_open)
+		return;
+	if (open && sh->start_open)
+		shell_toggle_start(sh);
+	sh->action_open = open;
+	sh->ac_hot = -1;
+	if (open)
+		ac_read_state(sh);
+	draw_action_center(sh);
+}
+
+bool shell_overlay_open(struct shell *sh) {
+	return sh->tv_open || sh->action_open;
+}
+
+void shell_close_overlays(struct shell *sh) {
+	if (sh->tv_open)
+		shell_task_view(sh);
+	shell_action_center(sh, false);
+}
+
+static void ac_set_bright(struct shell *sh, double x) {
+	int pct = (int)((x - sh->ac_bright.x) * 100 / sh->ac_bright.width);
+	pct = pct < 1 ? 1 : pct > 100 ? 100 : pct;
+	if (pct == sh->ac_bright_pct)
+		return;
+	sh->ac_bright_pct = pct;
+	char cmd[64];
+	snprintf(cmd, sizeof(cmd), "brightnessctl -q set %d%%", pct);
+	spawn(cmd);
+	draw_action_center(sh);
+}
+
+static void ac_toggle(struct shell *sh, int i) {
+	bool on = sh->ac_on[i];
+	switch (i) {
+	case AC_SAVER: spawn(on ? "powerprofilesctl set balanced" : "powerprofilesctl set power-saver"); break;
+	case AC_NETWORK: shell_action_center(sh, false); spawn("expede-settings network"); return;
+	case AC_SETTINGS: shell_action_center(sh, false); spawn("expede-settings"); return;
+	case AC_BLUETOOTH: spawn(on ? "bluetoothctl power off" : "bluetoothctl power on"); break;
+	case AC_WIFI: spawn(on ? "nmcli radio wifi off" : "nmcli radio wifi on"); break;
+	case AC_AIRPLANE: spawn(on ? "nmcli radio all on" : "nmcli radio all off"); break;
+	case AC_SNIP: shell_action_center(sh, false); spawn("expede-snip"); return;
+	case AC_FOCUS: sh->server->opt_sounds = on; break; /* focus assist keeps things quiet */
+	}
+	sh->ac_on[i] = !on;
+	draw_action_center(sh);
+}
+
+static bool ac_motion(struct shell *sh, double x, double y) {
+	if (sh->ac_bright_drag) {
+		ac_set_bright(sh, x);
+		return true;
+	}
+	if (x < sh->w - AC_W || y >= sh->h - bar_h(sh))
+		return false;
+	int hot = -1;
+	for (int i = 0; i < 8; i++)
+		if (in_box(&sh->ac_tiles[i], x, y))
+			hot = i;
+	if (hot != sh->ac_hot) {
+		sh->ac_hot = hot;
+		draw_action_center(sh);
+	}
+	return true;
+}
+
+/* true when the panel used the click */
+static bool ac_button(struct shell *sh, double x, double y, bool pressed) {
+	if (sh->ac_bright_drag && !pressed) {
+		sh->ac_bright_drag = false;
+		return true;
+	}
+	if (x < sh->w - AC_W || y >= sh->h - bar_h(sh))
+		return false;
+	if (pressed && in_box(&sh->ac_bright, x, y)) {
+		sh->ac_bright_drag = true;
+		ac_set_bright(sh, x);
+	} else if (!pressed) {
+		for (int i = 0; i < 8; i++)
+			if (in_box(&sh->ac_tiles[i], x, y))
+				ac_toggle(sh, i);
 	}
 	return true;
 }
