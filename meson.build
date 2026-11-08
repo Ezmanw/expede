@@ -76,3 +76,5 @@ install_data('data/expede.desktop', install_dir: get_option('datadir') / 'waylan
 install_data('data/expede-settings.desktop', install_dir: get_option('datadir') / 'applications')
 install_data('tools/xprip.py', install_dir: get_option('bindir'), rename: 'expede-xprip', install_mode: 'rwxr-xr-x')
 install_data('tools/w7rip.py', install_dir: get_option('bindir'), rename: 'expede-w7rip', install_mode: 'rwxr-xr-x')
+install_data('tools/w10rip.py', install_dir: get_option('bindir'), rename: 'expede-w10rip', install_mode: 'rwxr-xr-x')
+install_data('data/expede-greeter', install_dir: get_option('bindir'), install_mode: 'rwxr-xr-x')

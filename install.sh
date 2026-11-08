@@ -2,7 +2,8 @@
 # All-in-one Linux installer for Expede (Debian/Ubuntu/Mint/Pop!_OS, Arch/CachyOS/Manjaro,
 # Fedora/Nobara, openSUSE, Void, Alpine). Run from the repo or unpacked bundle:
 #   ./install.sh                            uses ./xp and/or ./7 (or ~/.local/share/expede/*) if present
-#   ./install.sh /path/to/winxp.iso [win7.iso]
+#   ./install.sh /path/to/winxp.iso [win7.iso] [win10.iso]
+#   EXPEDE_LOGIN=1 ./install.sh             also make Expede the login screen (greetd)
 set -e
 cd "$(dirname "$0")"
 
@@ -67,7 +68,12 @@ mkdir -p "$HOME/.local/share/expede" "$HOME/.local/share/fonts"
 if [ -n "$1" ]; then
 	for iso in "$@"; do
 		if "$SEVENZ_BIN" l "$iso" sources/install.wim 2>/dev/null | grep -q install.wim; then
-			python3 -I tools/w7rip.py "$iso"
+			# Windows 7 and 10 both ship install.wim; only 8 and later have setuphost.exe
+			if "$SEVENZ_BIN" l "$iso" sources/setuphost.exe 2>/dev/null | grep -qi setuphost; then
+				python3 -I tools/w10rip.py "$iso"
+			else
+				python3 -I tools/w7rip.py "$iso"
+			fi
 		else
 			python3 -I tools/xprip.py "$iso"
 		fi
@@ -77,20 +83,22 @@ if [ -d xp ]; then
 	rm -rf "$HOME/.local/share/expede/xp"
 	cp -r xp "$HOME/.local/share/expede/xp"
 fi
-if [ -d 7 ]; then
-	rm -rf "$HOME/.local/share/expede/7"
-	cp -r 7 "$HOME/.local/share/expede/7"
-fi
-if [ -d "$HOME/.local/share/expede/xp" ]; then
-	python3 -I tools/gtktheme.py "$HOME/.local/share/expede/xp" "$HOME/.local/share/themes"
-	cp "$HOME/.local/share/expede/xp/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null || true
-fi
-if [ -d "$HOME/.local/share/expede/7" ]; then
-	python3 -I tools/gtktheme.py "$HOME/.local/share/expede/7" "$HOME/.local/share/themes"
-	cp "$HOME/.local/share/expede/7/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null || true
-fi
-if [ ! -d "$HOME/.local/share/expede/xp" ] && [ ! -d "$HOME/.local/share/expede/7" ]; then
-	echo "No ripped files found: run ./install.sh /path/to/your/winxp.iso [win7.iso]" >&2
+for v in 7 10; do
+	if [ -d "$v" ]; then
+		rm -rf "$HOME/.local/share/expede/$v"
+		cp -r "$v" "$HOME/.local/share/expede/$v"
+	fi
+done
+found=""
+for v in xp 7 10; do
+	if [ -d "$HOME/.local/share/expede/$v" ]; then
+		python3 -I tools/gtktheme.py "$HOME/.local/share/expede/$v" "$HOME/.local/share/themes"
+		cp "$HOME/.local/share/expede/$v/fonts/"*.ttf "$HOME/.local/share/fonts/" 2>/dev/null || true
+		found="$found $v"
+	fi
+done
+if [ -z "$found" ]; then
+	echo "No ripped files found: run ./install.sh /path/to/your/winxp.iso [win7.iso] [win10.iso]" >&2
 	exit 1
 fi
 fc-cache -f
@@ -108,6 +116,37 @@ PKG_CONFIG_PATH="/usr/lib/wlroots0.18/pkgconfig:/usr/lib64/wlroots0.18/pkgconfig
 ninja -C build
 echo "== Installing (needs sudo)"
 sudo ninja -C build install >/dev/null
+
+# Expede as the login screen: greetd does the password check (PAM) and starts the
+# desktop you pick; Expede draws the Windows sign-in screen for it
+if [ "${EXPEDE_LOGIN:-}" = 1 ]; then
+	echo "== Making Expede the login screen (greetd)"
+	if command -v apt-get >/dev/null 2>&1; then sudo apt-get install -y greetd
+	elif command -v pacman >/dev/null 2>&1; then sudo pacman -S --needed --noconfirm greetd
+	elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y greetd
+	elif command -v zypper >/dev/null 2>&1; then sudo zypper install -y greetd
+	fi
+	# the login screen runs as its own user, so it gets its own copy of the Windows files
+	sudo rm -rf /usr/share/expede/assets
+	sudo mkdir -p /usr/share/expede/assets /etc/xdg/expede /usr/local/share/fonts/expede
+	for v in $found; do
+		sudo cp -r "$HOME/.local/share/expede/$v" /usr/share/expede/assets/
+		sudo cp "$HOME/.local/share/expede/$v/fonts/"*.ttf /usr/local/share/fonts/expede/ 2>/dev/null || true
+	done
+	sudo fc-cache -f
+	[ -f "$HOME/.config/expede/expede.conf" ] && sudo cp "$HOME/.config/expede/expede.conf" /etc/xdg/expede/expede.conf
+	GREETER_USER=_greetd
+	id -u "$GREETER_USER" >/dev/null 2>&1 || GREETER_USER=greeter
+	sudo mkdir -p /etc/greetd
+	printf '[terminal]\nvt = 7\n\n[default_session]\ncommand = "expede-greeter"\nuser = "%s"\n' "$GREETER_USER" |
+		sudo tee /etc/greetd/config.toml >/dev/null
+	for dm in gdm3 gdm lightdm sddm lxdm; do
+		sudo systemctl disable "$dm" 2>/dev/null || true
+	done
+	sudo systemctl enable greetd
+	echo "Expede is now your login screen (from the next boot)."
+	echo "To go back:  sudo systemctl disable greetd && sudo systemctl enable gdm3"
+fi
 
 echo
 echo "Expede is installed. Log out, pick \"Expede\" on the login screen"

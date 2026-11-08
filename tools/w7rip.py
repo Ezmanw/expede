@@ -491,6 +491,7 @@ AUTHUI_BITMAPS = {
     12303: 'shutdown', 12304: 'shutdown-hot', 12306: 'shutdown-pressed', 12292: 'shutdown-arrow',
     12293: 'shutdown-arrow-hot', 12295: 'shutdown-arrow-pressed', 12213: 'ease-of-access',
     12259: 'button', 12260: 'button-hot', 12261: 'button-pressed',
+    12215: 'shutdown-glyph', 12217: 'shutdown-arrow-glyph',
 }
 # imageres.dll logon backgrounds, one per aspect ratio (IMAGE 5031-5043)
 LOGON_BACKGROUNDS = range(5031, 5044)

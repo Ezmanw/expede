@@ -87,7 +87,8 @@ struct server {
 	struct wlr_buffer *glass_buf; /* the desktop, blurred, at 1/GLASS_DIV of the screen */
 	char cursor_theme[32];
 	bool own_gtk_theme;
-	bool super_alone; /* Win is down and nothing else has been pressed with it */
+	bool super_alone;
+	bool greeter; /* expede -g: the login screen for greetd */ /* Win is down and nothing else has been pressed with it */
 
 	enum grab_mode grab;
 	struct view *grab_view;
@@ -210,7 +211,7 @@ void session_layout(struct session *se);
 bool session_active(struct session *se);
 void session_motion(struct session *se, double x, double y);
 void session_button(struct session *se, double x, double y, bool pressed);
-void session_key(struct session *se, uint32_t sym);
+void session_key(struct session *se, uint32_t sym, const char *utf8);
 void session_logoff(struct session *se);
 void session_turnoff_dialog(struct session *se);
 /* XP sound events: startup, logon, logoff, shutdown, minimize, restore, ... */

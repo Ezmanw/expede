@@ -2094,13 +2094,17 @@ static void kb_key(struct wl_listener *l, void *data) {
 	}
 	if (s->session && session_active(s->session)) {
 		/* the Welcome screen and Turn Off dialog take the keyboard; Ctrl+Alt+Backspace still quits */
-		if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED)
+		if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			char utf8[16] = "";
+			xkb_state_key_get_utf8(k->wlr_keyboard->xkb_state, keycode, utf8, sizeof(utf8));
 			for (int i = 0; i < n; i++) {
+				/* Ctrl+Alt+Backspace still quits, except on the login screen */
 				if ((mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) == (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT) &&
-						syms[i] == XKB_KEY_BackSpace)
+						syms[i] == XKB_KEY_BackSpace && !s->greeter)
 					wl_display_terminate(s->display);
-				session_key(s->session, syms[i]);
+				session_key(s->session, syms[i], utf8);
 			}
+		}
 		return;
 	}
 	if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED && shell_start_open(s->shell) && !(mods & WLR_MODIFIER_LOGO)) {
@@ -2731,6 +2735,14 @@ static void reset_idle(struct server *s) {
 		wl_event_source_timer_update(s->idle_timer, s->opt_screen_off > 0 ? s->opt_screen_off * 60000 : 0);
 }
 
+/* systemd or greetd asking us to stop */
+static int on_sigterm(int sig, void *data) {
+	(void)sig;
+	struct server *s = data;
+	wl_display_terminate(s->display);
+	return 0;
+}
+
 static int on_sighup(int sig, void *data) {
 	struct server *s = data;
 	load_config(s);
@@ -2814,20 +2826,28 @@ int main(int argc, char *argv[]) {
 	const char *startup = NULL;
 	bool autologin = false;
 	int c;
-	while ((c = getopt(argc, argv, "s:ah")) != -1) {
+	bool greeter = false;
+	while ((c = getopt(argc, argv, "s:agh")) != -1) {
 		if (c == 's')
 			startup = optarg;
 		else if (c == 'a')
 			autologin = true;
+		else if (c == 'g')
+			greeter = true; /* run as greetd's login screen */
 		else {
-			printf("Usage: %s [-a] [-s startup command]\n"
-				"  -a  skip the Welcome screen and log straight on\n", argv[0]);
+			printf("Usage: %s [-a] [-g] [-s startup command]\n"
+				"  -a  skip the Welcome screen and log straight on\n"
+				"  -g  be the login screen (run by greetd; see expede-greeter)\n", argv[0]);
 			return 0;
 		}
 	}
 
 	struct server s = {0};
 	the_server = &s;
+	s.greeter = greeter;
+	/* signed in through Expede's login screen: no second Welcome screen */
+	if (getenv("EXPEDE_GREETD"))
+		autologin = true;
 	/* <data>/expede/xp from xprip, <data>/expede/7 from w7rip: either or both */
 	char dir7[600];
 	snprintf(dir7, sizeof(dir7), "%s", default_assets());
@@ -2934,6 +2954,7 @@ int main(int argc, char *argv[]) {
 	s.idle_inhibit = wlr_idle_inhibit_v1_create(s.display);
 	s.idle_timer = wl_event_loop_add_timer(wl_display_get_event_loop(s.display), idle_fire, &s);
 	wl_event_loop_add_signal(wl_display_get_event_loop(s.display), SIGHUP, on_sighup, &s);
+	wl_event_loop_add_signal(wl_display_get_event_loop(s.display), SIGTERM, on_sigterm, &s);
 	wl_event_loop_add_signal(wl_display_get_event_loop(s.display), SIGUSR1, on_sigusr1, &s);
 
 	const char *socket = wl_display_add_socket_auto(s.display);
@@ -2958,12 +2979,18 @@ int main(int argc, char *argv[]) {
 	reset_idle(&s);
 	/* asks for your password when a setting needs it (time zone, printers...), in XP style
 	 * since it is a GTK program */
-	if (access("/usr/bin/lxpolkit", X_OK) == 0)
+	if (!s.greeter && access("/usr/bin/lxpolkit", X_OK) == 0)
 		spawn("/usr/bin/lxpolkit");
 	if (startup)
 		spawn(startup);
 	wlr_log(WLR_INFO, "Expede running on WAYLAND_DISPLAY=%s", socket);
 	wl_display_run(s.display);
+	if (s.greeter) {
+		/* greetd starts the desktop as soon as its greeter has gone: go now, and let
+		 * the kernel give the screen back (no teardown that could hold it) */
+		fflush(NULL);
+		_exit(0);
+	}
 
 	wl_display_destroy_clients(s.display);
 	wlr_scene_node_destroy(&s.scene->tree.node);

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Expede's login screen, started by greetd (/etc/greetd/config.toml runs this).
+# It reads the Windows files and settings that install.sh copied to
+# /usr/share/expede/assets and /etc/xdg/expede. If it can't start for any
+# reason, greetd's plain text login takes over, so nobody is locked out.
+export EXPEDE_ASSETS=/usr/share/expede/assets/xp
+export XDG_CONFIG_HOME=/etc/xdg
+[ -r /etc/expede/greeter.env ] && . /etc/expede/greeter.env
+expede -g && exit 0
+exec agreety --cmd "${EXPEDE_FALLBACK_CMD:-expede}"

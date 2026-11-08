@@ -5,15 +5,20 @@
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <math.h>
+#include <pwd.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 #include "expede.h"
 
 enum state { ST_WELCOME, ST_LOGGING_ON, ST_DESKTOP, ST_LOGGING_OFF, ST_SHUTTING_DOWN, ST_TURNOFF };
-enum hot { HOT_NONE, HOT_ACCOUNT, HOT_TURNOFF, HOT_STANDBY, HOT_OFF, HOT_RESTART, HOT_CANCEL, HOT_W7_ARROW, HOT_W7_MENU_RESTART, HOT_W7_MENU_SLEEP, HOT_W7_MENU_LOGOFF };
+enum hot { HOT_NONE, HOT_ACCOUNT, HOT_GO, HOT_EASE, HOT_USER0 = 100, HOT_SESSION0 = 200, HOT_TURNOFF, HOT_STANDBY, HOT_OFF, HOT_RESTART, HOT_CANCEL, HOT_W7_ARROW, HOT_W7_MENU_RESTART, HOT_W7_MENU_SLEEP, HOT_W7_MENU_LOGOFF };
 enum after { AFTER_NONE, AFTER_POWEROFF, AFTER_REBOOT };
 
 struct session {
@@ -32,6 +37,15 @@ struct session {
 	/* Windows 7 logon assets */
 	cairo_surface_t *w7_bg, *w7_branding[2], *w7_tile_frame, *w7_spinner, *w7_ease;
 	cairo_surface_t *w7_go[3], *w7_shutdown[3], *w7_shutdown_arrow[3], *w7_button[3];
+	cairo_surface_t *w7_power_glyph, *w7_arrow_glyph, *w7_tile_small[2];
+	/* login manager (expede -g under greetd): accounts, password, which desktop to start */
+	bool greeter;
+	struct account { char name[64], full[96]; } users[16];
+	int n_users, user_sel;
+	char password[128], error[160];
+	struct desktop { char name[64], exec[256], desktop[64]; bool x11; } sessions[16];
+	int n_sessions, session_sel;
+	bool session_menu;
 };
 
 /* ---- sounds ---- */
@@ -63,8 +77,40 @@ static struct wlr_box account_box(struct session *se) {
 	return (struct wlr_box){se->w / 2 + 26, content_mid(se) - 36, 308, 72};
 }
 
+/* sign-in: the password box under the name, the arrow just right of it */
+static struct wlr_box pw_box(struct session *se) {
+	if (logon7(se))
+		return (struct wlr_box){(se->w - 225) / 2 - 20, se->h / 2 + 70, 225, 25};
+	struct wlr_box a = {se->w / 2 + 26, content_mid(se) - 36 - (se->n_users - 1) * 40 + se->user_sel * 80, 308, 72};
+	return (struct wlr_box){a.x + 72, a.y + 46, 150, 20};
+}
+
 static struct wlr_box w7_go_box(struct session *se) {
+	if (se->greeter && se->user_sel >= 0) {
+		struct wlr_box p = pw_box(se);
+		return logon7(se) ? (struct wlr_box){p.x + p.width + 4, p.y - 7, 38, 38} : (struct wlr_box){p.x + p.width + 6, p.y - 2, 24, 24};
+	}
 	return (struct wlr_box){(se->w - 38) / 2, se->h / 2 + 64, 38, 38};
+}
+
+/* XP lists every account down the right; Windows 7 shows a row of tiles until you pick one */
+static struct wlr_box user_box(struct session *se, int i) {
+	if (logon7(se)) {
+		int n = se->n_users, x0 = (se->w - n * 150) / 2;
+		return (struct wlr_box){x0 + i * 150, se->h / 2 - 90, 150, 150};
+	}
+	return (struct wlr_box){se->w / 2 + 26, content_mid(se) - 36 - (se->n_users - 1) * 40 + i * 80, 308, 72};
+}
+
+static struct wlr_box ease_box(struct session *se) {
+	if (logon7(se))
+		return (struct wlr_box){32, se->h - 32 - 28, 35, 28};
+	return (struct wlr_box){25, se->h - bottom_h(se) + 56, 260, 20};
+}
+
+static struct wlr_box session_row(struct session *se, int i) {
+	struct wlr_box e = ease_box(se);
+	return (struct wlr_box){e.x, e.y - 8 - (se->n_sessions - i) * 26, 240, 26};
 }
 
 static struct wlr_box turnoff_box(struct session *se) {
@@ -147,18 +193,104 @@ static void draw_frame_screen(struct session *se, cairo_t *cr) {
 	stretch(cr, se->div_bottom, 0, h - bh - 1, w, 3);
 }
 
+static void draw_account_at(struct session *se, cairo_t *cr, struct wlr_box a, const char *user, bool selected,
+		const char *status);
+
 static void draw_account(struct session *se, cairo_t *cr, bool selected, const char *status) {
-	struct wlr_box a = account_box(se);
+	const char *user = getenv("USER") ? getenv("USER") : "User";
+	if (se->greeter && se->user_sel >= 0)
+		user = se->users[se->user_sel].full;
+	draw_account_at(se, cr, account_box(se), user, selected, status);
+}
+
+static void draw_account_at(struct session *se, cairo_t *cr, struct wlr_box a, const char *user, bool selected,
+		const char *status) {
 	if (selected)
 		draw_surface(cr, se->account_sel, a.x, a.y);
 	int fx = a.x + 7, fy = a.y + 7;
 	draw_surface(cr, selected ? se->frame_hot : se->frame, fx, fy);
 	if (se->server->theme.user_pic)
 		stretch(cr, se->server->theme.user_pic, fx + 5, fy + 5, 48, 48);
-	const char *user = getenv("USER") ? getenv("USER") : "User";
 	draw_text(cr, "Tahoma 14", user, fx + 58 + 7, fy + (status ? 8 : 17), 220, 0xeff7ff, 0, 0, 0, false);
 	if (status)
 		draw_text(cr, "Tahoma Bold 8", status, fx + 58 + 7, fy + 34, 220, 0xeff7ff, 0, 0, 0, false);
+}
+
+/* the password box: white, bullets for what's typed, a hint when empty */
+static void draw_password(struct session *se, cairo_t *cr, bool w7) {
+	struct wlr_box p = pw_box(se);
+	rgb(cr, w7 ? 0x6a8bb2 : 0x7f9db9);
+	cairo_rectangle(cr, p.x - 1, p.y - 1, p.width + 2, p.height + 2);
+	cairo_fill(cr);
+	rgb(cr, 0xffffff);
+	cairo_rectangle(cr, p.x, p.y, p.width, p.height);
+	cairo_fill(cr);
+	int n = strlen(se->password);
+	const char *font = w7 ? "Segoe UI 9" : "Tahoma 8";
+	if (!n) {
+		draw_text(cr, w7 ? "Segoe UI, Italic 9" : "Tahoma 8", w7 ? "Password" : "", p.x + 6, p.y + (p.height - 15) / 2, 0,
+			0x8d8d8d, 0, 0, 0, false);
+	}
+	char dots[128] = "";
+	for (int i = 0; i < n && i < 40; i++)
+		strcat(dots, "\u25cf");
+	int dw = draw_text(cr, font, dots, p.x + 6, p.y + (p.height - 15) / 2, p.width - 12, 0x000000, 0, 0, 0, false);
+	rgb(cr, 0x000000);
+	cairo_rectangle(cr, p.x + 6 + (n ? dw + 1 : 0), p.y + 4, 1, p.height - 8);
+	cairo_fill(cr);
+	if (!w7) {
+		/* XP's green arrow */
+		struct wlr_box g = w7_go_box(se);
+		cairo_arc(cr, g.x + 11, g.y + 11, 11, 0, 2 * M_PI);
+		rgb(cr, se->hot == HOT_GO ? 0x55c25a : 0x3aa83f);
+		cairo_fill(cr);
+		rgb(cr, 0xffffff);
+		cairo_move_to(cr, g.x + 6, g.y + 9);
+		cairo_line_to(cr, g.x + 11, g.y + 9);
+		cairo_line_to(cr, g.x + 11, g.y + 5);
+		cairo_line_to(cr, g.x + 17, g.y + 11);
+		cairo_line_to(cr, g.x + 11, g.y + 17);
+		cairo_line_to(cr, g.x + 11, g.y + 13);
+		cairo_line_to(cr, g.x + 6, g.y + 13);
+		cairo_close_path(cr);
+		cairo_fill(cr);
+		draw_text(cr, "Tahoma 8", "Type your password", p.x, p.y - 16, 0, 0xeff7ff, 0, 0, 0, false);
+	}
+	if (se->error[0])
+		draw_text(cr, font, se->error, w7 ? (se->w - text_width(font, se->error)) / 2 : p.x, p.y + p.height + 10, 0,
+			0xffffff, w7 ? 1 : 0, w7 ? 1 : 0, 0x000000, false);
+}
+
+/* the desktops you can sign in to (Expede, GNOME...) */
+static void draw_session_menu(struct session *se, cairo_t *cr, bool w7) {
+	struct wlr_box e = ease_box(se);
+	if (!w7) {
+		char lbl[120];
+		snprintf(lbl, sizeof(lbl), "Desktop: %s  \u25be", se->n_sessions ? se->sessions[se->session_sel].name : "Expede");
+		draw_text(cr, "Tahoma 9", lbl, e.x, e.y, 0, 0xffffff, 0, 0, 0, false);
+	}
+	if (!se->session_menu || !se->n_sessions)
+		return;
+	struct wlr_box top = session_row(se, 0);
+	rgb(cr, 0x646464);
+	cairo_rectangle(cr, top.x - 1, top.y - 1, top.width + 2, se->n_sessions * 26 + 2);
+	cairo_fill(cr);
+	rgb(cr, 0xf0f0f0);
+	cairo_rectangle(cr, top.x, top.y, top.width, se->n_sessions * 26);
+	cairo_fill(cr);
+	for (int i = 0; i < se->n_sessions; i++) {
+		struct wlr_box r = session_row(se, i);
+		bool hot = se->hot == (enum hot)(HOT_SESSION0 + i);
+		if (hot) {
+			rgb(cr, w7 ? 0x3399ff : 0x316ac5);
+			cairo_rectangle(cr, r.x + 1, r.y + 1, r.width - 2, r.height - 2);
+			cairo_fill(cr);
+		}
+		char lbl[96];
+		snprintf(lbl, sizeof(lbl), "%s%s", i == se->session_sel ? "\u2713  " : "     ", se->sessions[i].name);
+		draw_text(cr, w7 ? "Segoe UI 9" : "Tahoma 8", lbl, r.x + 8, r.y + 5, r.width - 12, hot ? 0xffffff : 0x000000,
+			0, 0, 0, false);
+	}
 }
 
 /* pick logon/background-WxH.jpg with the closest aspect ratio to the screen */
@@ -226,21 +358,40 @@ static void draw_welcome7(struct session *se, cairo_t *cr) {
 		return;
 	}
 
-	/* centered user tile (190x190 frame around 126x126 account picture) */
-	int fx = (w - 190) / 2, fy = h / 2 - 165;
 	cairo_surface_t *upic = t7->user_pic ? t7->user_pic : se->server->theme.user_pic;
-	if (upic)
-		stretch(cr, upic, fx + 32, fy + 32, 126, 126);
-	draw_surface(cr, se->w7_tile_frame, fx, fy);
-
-	const char *user = getenv("USER") ? getenv("USER") : "User";
-	int uw = text_width("Segoe UI 18", user);
-	draw_text(cr, "Segoe UI 18", user, (w - uw) / 2, fy + 188, 0, 0xffffff, 1, 2, 0x000000, false);
-
-	/* Go arrow button beneath the user name */
-	struct wlr_box gb = w7_go_box(se);
-	int gf = se->pressed == HOT_ACCOUNT ? 2 : se->hot == HOT_ACCOUNT ? 1 : 0;
-	draw_surface(cr, se->w7_go[gf], gb.x, gb.y);
+	if (se->greeter && se->user_sel < 0) {
+		/* several accounts: a tile each; click one to sign in */
+		for (int i = 0; i < se->n_users; i++) {
+			struct wlr_box b = user_box(se, i);
+			bool hot = se->hot == (enum hot)(HOT_USER0 + i);
+			int tx = b.x + (b.width - 80) / 2, ty = b.y;
+			if (upic)
+				stretch(cr, upic, tx + 12, ty + 12, 56, 56);
+			draw_surface(cr, se->w7_tile_small[hot], tx, ty);
+			int nw = text_width("Segoe UI 11", se->users[i].full);
+			draw_text(cr, "Segoe UI 11", se->users[i].full, b.x + (b.width - nw) / 2, ty + 88, b.width, 0xffffff, 1, 1,
+				0x000000, false);
+		}
+	} else {
+		/* centered user tile (190x190 frame around 126x126 account picture) */
+		int fx = (w - 190) / 2, fy = h / 2 - 165;
+		if (upic)
+			stretch(cr, upic, fx + 32, fy + 32, 126, 126);
+		draw_surface(cr, se->w7_tile_frame, fx, fy);
+		const char *user = se->greeter ? se->users[se->user_sel].full : getenv("USER") ? getenv("USER") : "User";
+		int uw = text_width("Segoe UI 18", user);
+		draw_text(cr, "Segoe UI 18", user, (w - uw) / 2, fy + 188, 0, 0xffffff, 1, 2, 0x000000, false);
+		if (se->greeter)
+			draw_password(se, cr, true);
+		/* Go arrow button beneath the user name (beside the password when signing in) */
+		struct wlr_box gb = w7_go_box(se);
+		enum hot gh = se->greeter ? HOT_GO : HOT_ACCOUNT;
+		int gf = se->pressed == gh ? 2 : se->hot == gh ? 1 : 0;
+		draw_surface(cr, se->w7_go[gf], gb.x, gb.y);
+		if (se->greeter && se->n_users > 1)
+			draw_text(cr, "Segoe UI 9", "Switch User", (w - text_width("Segoe UI 9", "Switch User")) / 2, h / 2 + 140, 0,
+				se->hot == HOT_ACCOUNT ? 0xffffff : 0xdde6f2, 1, 1, 0x000000, false);
+	}
 
 	/* bottom-left Ease of Access button */
 	if (se->w7_button[0]) {
@@ -255,6 +406,15 @@ static void draw_welcome7(struct session *se, cairo_t *cr) {
 	int af = (se->pressed == HOT_W7_ARROW || se->w7_power_menu) ? 2 : se->hot == HOT_W7_ARROW ? 1 : 0;
 	draw_surface(cr, se->w7_shutdown[sf], tb.x, tb.y);
 	draw_surface(cr, se->w7_shutdown_arrow[af], ab.x, ab.y);
+	/* the power symbol and the little arrow sit on top of the red buttons */
+	if (se->w7_power_glyph)
+		draw_surface(cr, se->w7_power_glyph, tb.x + (tb.width - cairo_image_surface_get_width(se->w7_power_glyph)) / 2,
+			tb.y + (tb.height - cairo_image_surface_get_height(se->w7_power_glyph)) / 2);
+	if (se->w7_arrow_glyph)
+		draw_surface(cr, se->w7_arrow_glyph, ab.x + (ab.width - cairo_image_surface_get_width(se->w7_arrow_glyph)) / 2,
+			ab.y + (ab.height - cairo_image_surface_get_height(se->w7_arrow_glyph)) / 2);
+	if (se->greeter)
+		draw_session_menu(se, cr, true);
 
 	if (se->w7_power_menu) {
 		struct wlr_box mb = w7_power_menu_box(se);
@@ -307,7 +467,16 @@ static void draw_welcome(struct session *se, cairo_t *cr) {
 	}
 	draw_surface(cr, se->logo, w / 2 - 30 - 137, mid - 86);
 	text_right(cr, "Arial 14", "To begin, click your user name", w / 2 - 30, mid + 8, 0xeff7ff, 0, 0, 0);
-	draw_account(se, cr, se->hot == HOT_ACCOUNT, NULL);
+	if (se->greeter) {
+		for (int i = 0; i < se->n_users; i++)
+			draw_account_at(se, cr, user_box(se, i), se->users[i].full,
+				i == se->user_sel || se->hot == (enum hot)(HOT_USER0 + i), NULL);
+		if (se->user_sel >= 0)
+			draw_password(se, cr, false);
+		draw_session_menu(se, cr, false);
+	} else {
+		draw_account(se, cr, se->hot == HOT_ACCOUNT, NULL);
+	}
 
 	struct wlr_box t = turnoff_box(se);
 	draw_surface(cr, se->hot == HOT_TURNOFF ? se->turnoff_hot : se->turnoff, t.x, t.y);
@@ -393,12 +562,22 @@ static int on_timer(void *data) {
 	struct server *s = se->server;
 	switch (se->state) {
 	case ST_LOGGING_ON:
+		if (se->greeter) {
+			/* greetd starts the desktop once its greeter has gone */
+			wl_display_terminate(s->display);
+			break;
+		}
 		set_state(se, ST_DESKTOP, 0);
 		sound_play(s, se->startup_played ? "logon" : "startup");
 		se->startup_played = true;
 		break;
 	case ST_LOGGING_OFF:
 		close_all_windows(s, true); /* anything that ignored the polite close */
+		if (getenv("EXPEDE_GREETD")) {
+			/* signed in through the login screen: signing out goes back to it */
+			wl_display_terminate(s->display);
+			break;
+		}
 		set_state(se, ST_WELCOME, 0);
 		break;
 	case ST_SHUTTING_DOWN:
@@ -437,6 +616,224 @@ static void dialog_cancel(struct session *se) {
 	set_state(se, se->dialog_from, 0);
 }
 
+/* ---- login manager: greetd ---- */
+
+/* the people who can sign in: real accounts with a login shell */
+static void load_users(struct session *se) {
+	se->n_users = 0;
+	struct passwd *pw;
+	setpwent();
+	while ((pw = getpwent()) && se->n_users < 16) {
+		if (pw->pw_uid < 1000 || pw->pw_uid >= 60000 || !pw->pw_shell || strstr(pw->pw_shell, "nologin") ||
+				strstr(pw->pw_shell, "false"))
+			continue;
+		snprintf(se->users[se->n_users].name, sizeof(se->users[0].name), "%s", pw->pw_name);
+		char full[96] = "";
+		if (pw->pw_gecos)
+			snprintf(full, sizeof(full), "%.*s", (int)strcspn(pw->pw_gecos, ","), pw->pw_gecos);
+		snprintf(se->users[se->n_users].full, sizeof(se->users[0].full), "%s", full[0] ? full : pw->pw_name);
+		se->n_users++;
+	}
+	endpwent();
+	se->user_sel = se->n_users == 1 ? 0 : -1;
+}
+
+static char *desktop_value(const char *text, const char *key) {
+	static char val[256];
+	size_t kl = strlen(key);
+	for (const char *l = text; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL)
+		if (!strncmp(l, key, kl) && l[kl] == '=') {
+			snprintf(val, sizeof(val), "%.*s", (int)strcspn(l + kl + 1, "\n"), l + kl + 1);
+			return val;
+		}
+	return NULL;
+}
+
+/* every desktop installed: wayland-sessions, and X ones when startx is there */
+static void load_sessions(struct session *se) {
+	se->n_sessions = 0;
+	const char *dirs[2] = {"/usr/share/wayland-sessions", "/usr/share/xsessions"};
+	for (int k = 0; k < 2; k++) {
+		if (k == 1 && access("/usr/bin/startx", X_OK) != 0)
+			break;
+		DIR *d = opendir(dirs[k]);
+		struct dirent *de;
+		while (d && (de = readdir(d)) && se->n_sessions < 16) {
+			if (!strstr(de->d_name, ".desktop"))
+				continue;
+			char path[512], text[4096];
+			snprintf(path, sizeof(path), "%s/%s", dirs[k], de->d_name);
+			FILE *f = fopen(path, "r");
+			if (!f)
+				continue;
+			size_t n = fread(text, 1, sizeof(text) - 1, f);
+			text[n] = 0;
+			fclose(f);
+			char *name = desktop_value(text, "Name"), *exec;
+			if (!name)
+				continue;
+			char nm[64];
+			snprintf(nm, sizeof(nm), "%s", name);
+			if (!(exec = desktop_value(text, "Exec")))
+				continue;
+			bool dup = false;
+			for (int i = 0; i < se->n_sessions; i++)
+				dup |= !strcmp(se->sessions[i].name, nm);
+			if (dup)
+				continue;
+			struct desktop *ss = &se->sessions[se->n_sessions++];
+			snprintf(ss->name, sizeof(ss->name), "%s%s", nm, k ? " (X11)" : "");
+			snprintf(ss->exec, sizeof(ss->exec), "%s", exec);
+			char *dn = desktop_value(text, "DesktopNames");
+			snprintf(ss->desktop, sizeof(ss->desktop), "%s", dn ? dn : nm);
+			ss->x11 = k == 1;
+		}
+		if (d)
+			closedir(d);
+	}
+	se->session_sel = 0;
+	for (int i = 0; i < se->n_sessions; i++)
+		if (!strncmp(se->sessions[i].exec, "expede", 6) || strstr(se->sessions[i].exec, "/expede"))
+			se->session_sel = i;
+}
+
+/* greetd talks length-prefixed JSON over $GREETD_SOCK */
+static int gd_fd = -1;
+
+static void json_quote(char *out, size_t cap, const char *in) {
+	size_t o = 0;
+	out[o++] = '"';
+	for (; *in && o + 8 < cap; in++) {
+		unsigned char c = *in;
+		if (c == '"' || c == '\\')
+			o += snprintf(out + o, cap - o, "\\%c", c);
+		else if (c < 0x20)
+			o += snprintf(out + o, cap - o, "\\u%04x", c);
+		else
+			out[o++] = c;
+	}
+	out[o++] = '"';
+	out[o] = 0;
+}
+
+static bool gd_send(const char *json) {
+	uint32_t n = strlen(json);
+	return write(gd_fd, &n, 4) == 4 && write(gd_fd, json, n) == (ssize_t)n;
+}
+
+static char *gd_recv(void) {
+	uint32_t n;
+	if (read(gd_fd, &n, 4) != 4 || n > 65536)
+		return NULL;
+	char *buf = malloc(n + 1);
+	size_t got = 0;
+	while (got < n) {
+		ssize_t r = read(gd_fd, buf + got, n - got);
+		if (r <= 0) {
+			free(buf);
+			return NULL;
+		}
+		got += r;
+	}
+	buf[n] = 0;
+	return buf;
+}
+
+static void set_state(struct session *se, enum state st, int timeout_ms);
+
+static void session_greeter_done(struct session *se) {
+	set_state(se, ST_LOGGING_ON, 700);
+}
+
+/* sign in: greetd asks PAM, which asks for the password; then it starts the desktop */
+static void greeter_login(struct session *se) {
+	if (se->user_sel < 0)
+		return;
+	const char *sock = getenv("GREETD_SOCK");
+	if (gd_fd < 0 && sock) {
+		gd_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		struct sockaddr_un a = {.sun_family = AF_UNIX};
+		snprintf(a.sun_path, sizeof(a.sun_path), "%s", sock);
+		if (connect(gd_fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+			close(gd_fd);
+			gd_fd = -1;
+		}
+	}
+	if (gd_fd < 0) {
+		snprintf(se->error, sizeof(se->error), "The sign-in service isn't running.");
+		redraw(se);
+		return;
+	}
+	char q[400], msg[1200];
+	json_quote(q, sizeof(q), se->users[se->user_sel].name);
+	snprintf(msg, sizeof(msg), "{\"type\":\"create_session\",\"username\":%s}", q);
+	gd_send(msg);
+	for (int round = 0; round < 8; round++) {
+		char *r = gd_recv();
+		if (!r)
+			break;
+		if (strstr(r, "\"success\"")) {
+			free(r);
+			/* start the chosen desktop */
+			struct desktop *ss = se->n_sessions ? &se->sessions[se->session_sel] : NULL;
+			char exec[300] = "expede", cmd[700], env[600];
+			if (ss) {
+				snprintf(exec, sizeof(exec), "%s", ss->exec);
+				char *pct = strstr(exec, " %");
+				if (pct)
+					*pct = 0;
+			}
+			char line[400], full[500];
+			/* its output goes to ~/.cache/expede-session.log, for when a desktop won't start */
+			snprintf(line, sizeof(line), "mkdir -p \"$HOME/.cache\"; exec %s%s >\"$HOME/.cache/expede-session.log\" 2>&1",
+				ss && ss->x11 ? "startx " : "", exec);
+			/* greetd runs "exec <cmd>" in a login shell, joining the words: hand it one quoted command */
+			snprintf(full, sizeof(full), "/bin/sh -c '%s'", line);
+			json_quote(cmd, sizeof(cmd), full);
+			char kv[160], e1[200], e2[200];
+			snprintf(kv, sizeof(kv), "XDG_CURRENT_DESKTOP=%s", ss ? ss->desktop : "Expede");
+			json_quote(e1, sizeof(e1), kv);
+			snprintf(kv, sizeof(kv), "XDG_SESSION_DESKTOP=%s", ss ? ss->desktop : "Expede");
+			json_quote(e2, sizeof(e2), kv);
+			/* EXPEDE_GREETD: Log off ends the session and comes back here */
+			snprintf(env, sizeof(env), "[\"XDG_SESSION_TYPE=%s\",%s,%s,\"EXPEDE_GREETD=1\"]",
+				ss && ss->x11 ? "x11" : "wayland", e1, e2);
+			snprintf(msg, sizeof(msg), "{\"type\":\"start_session\",\"cmd\":[%s],\"env\":%s}", cmd, env);
+			gd_send(msg);
+			char *ok = gd_recv();
+			bool started = ok && strstr(ok, "\"success\"");
+			free(ok);
+			memset(se->password, 0, sizeof(se->password));
+			if (started) {
+				session_greeter_done(se);
+				return;
+			}
+			snprintf(se->error, sizeof(se->error), "That desktop couldn't be started.");
+			break;
+		}
+		if (strstr(r, "\"auth_message\"")) {
+			bool secret = strstr(r, "\"secret\"") || strstr(r, "\"visible\"");
+			free(r);
+			if (secret) {
+				json_quote(q, sizeof(q), se->password);
+				snprintf(msg, sizeof(msg), "{\"type\":\"post_auth_message_response\",\"response\":%s}", q);
+			} else {
+				snprintf(msg, sizeof(msg), "{\"type\":\"post_auth_message_response\"}");
+			}
+			gd_send(msg);
+			continue;
+		}
+		/* an error: wrong password, locked account... */
+		snprintf(se->error, sizeof(se->error), "The user name or password is incorrect.");
+		free(r);
+		gd_send("{\"type\":\"cancel_session\"}");
+		free(gd_recv());
+		break;
+	}
+	memset(se->password, 0, sizeof(se->password));
+	redraw(se);
+}
+
 /* ---- input ---- */
 
 bool session_active(struct session *se) {
@@ -444,6 +841,25 @@ bool session_active(struct session *se) {
 }
 
 static enum hot hot_at(struct session *se, double x, double y) {
+	if (se->state == ST_WELCOME && se->greeter) {
+		if (se->session_menu)
+			for (int i = 0; i < se->n_sessions; i++)
+				if (in_box(session_row(se, i), x, y))
+					return HOT_SESSION0 + i;
+		if (in_box(ease_box(se), x, y))
+			return HOT_EASE;
+		if (se->user_sel >= 0 && in_box(w7_go_box(se), x, y))
+			return HOT_GO;
+		if (logon7(se) && se->user_sel >= 0) {
+			/* "Switch User" back to the tiles */
+			if (se->n_users > 1 && y >= se->h / 2 + 136 && y < se->h / 2 + 160 && fabs(x - se->w / 2) < 50)
+				return HOT_ACCOUNT;
+		} else {
+			for (int i = 0; i < se->n_users; i++)
+				if (in_box(user_box(se, i), x, y))
+					return HOT_USER0 + i;
+		}
+	}
 	if (se->state == ST_WELCOME) {
 		if (logon7(se) && se->w7_power_menu) {
 			struct wlr_box mb = w7_power_menu_box(se);
@@ -498,6 +914,36 @@ void session_button(struct session *se, double x, double y, bool pressed) {
 		redraw(se);
 		return;
 	}
+	if (se->greeter && se->state == ST_WELCOME) {
+		if (h >= HOT_SESSION0 && h < HOT_SESSION0 + se->n_sessions) {
+			se->session_sel = h - HOT_SESSION0;
+			se->session_menu = false;
+			redraw(se);
+			return;
+		}
+		if (h >= HOT_USER0 && h < HOT_USER0 + se->n_users) {
+			se->user_sel = h - HOT_USER0;
+			se->error[0] = 0;
+			memset(se->password, 0, sizeof(se->password));
+			redraw(se);
+			return;
+		}
+		if (h == HOT_EASE) {
+			se->session_menu = !se->session_menu;
+			redraw(se);
+			return;
+		}
+		if (h == HOT_GO) {
+			greeter_login(se);
+			return;
+		}
+		if (h == HOT_ACCOUNT) {
+			se->user_sel = -1;
+			se->error[0] = 0;
+			redraw(se);
+			return;
+		}
+	}
 	switch (h) {
 	case HOT_ACCOUNT:
 		set_state(se, ST_LOGGING_ON, 1800);
@@ -541,7 +987,31 @@ void session_button(struct session *se, double x, double y, bool pressed) {
 	}
 }
 
-void session_key(struct session *se, uint32_t sym) {
+void session_key(struct session *se, uint32_t sym, const char *utf8) {
+	if (se->greeter && se->state == ST_WELCOME) {
+		size_t n = strlen(se->password);
+		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			if (se->user_sel >= 0)
+				greeter_login(se);
+		} else if (sym == XKB_KEY_Escape) {
+			se->session_menu = false;
+			memset(se->password, 0, sizeof(se->password));
+			if (se->n_users > 1)
+				se->user_sel = -1;
+			se->error[0] = 0;
+		} else if (sym == XKB_KEY_BackSpace) {
+			while (n && (se->password[n - 1] & 0xc0) == 0x80)
+				n--;
+			if (n)
+				se->password[n - 1] = 0;
+		} else if (se->user_sel >= 0 && utf8 && (unsigned char)utf8[0] >= 0x20 && utf8[0] != 0x7f &&
+				n + strlen(utf8) < sizeof(se->password) - 1) {
+			strcat(se->password, utf8);
+			se->error[0] = 0;
+		}
+		redraw(se);
+		return;
+	}
 	if (se->state == ST_TURNOFF && sym == XKB_KEY_Escape)
 		dialog_cancel(se);
 	else if (se->state == ST_WELCOME && se->w7_power_menu && sym == XKB_KEY_Escape) {
@@ -561,6 +1031,12 @@ void session_layout(struct session *se) {
 struct session *session_create(struct server *s, bool autologin) {
 	struct session *se = calloc(1, sizeof(*se));
 	se->server = s;
+	se->greeter = s->greeter;
+	if (se->greeter) {
+		load_users(se);
+		load_sessions(se);
+		autologin = false;
+	}
 	struct theme *t = &s->theme;
 	se->glow = theme_png(t, "logon/glow.png");
 	se->logo = theme_png(t, "logon/logo.png");
@@ -594,6 +1070,10 @@ struct session *session_create(struct server *s, bool autologin) {
 		se->w7_button[0] = theme_png(t7, "logon/button.png");
 		se->w7_button[1] = theme_png(t7, "logon/button-hot.png");
 		se->w7_button[2] = theme_png(t7, "logon/button-pressed.png");
+		se->w7_power_glyph = theme_png(t7, "logon/shutdown-glyph.png");
+		se->w7_arrow_glyph = theme_png(t7, "logon/shutdown-arrow-glyph.png");
+		se->w7_tile_small[0] = theme_png(t7, "logon/tile-small.png");
+		se->w7_tile_small[1] = theme_png(t7, "logon/tile-small-hot.png");
 	}
 
 	se->timer = wl_event_loop_add_timer(wl_display_get_event_loop(s->display), on_timer, se);
