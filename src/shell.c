@@ -118,6 +118,12 @@ struct shell {
 	bool ac_on[8];
 	int ac_hot, ac_bright_pct;
 	bool ac_bright_drag;
+	/* Windows 10 Start */
+	struct hit10 { struct wlr_box b; int id; } hits10[160];
+	int n_hits10, hot10, scroll10;
+	bool rail_open, power_menu10, user_menu10;
+	struct icon_set tile_img[6];
+	struct theme *tile_theme;
 	struct wlr_box bat_box;      /* layout coords */
 	struct wlr_scene_buffer *batpop;
 	struct wlr_scene_rect *bright_veil;
@@ -180,7 +186,9 @@ static bool desk7(struct shell *sh) { return desk_theme(sh)->version >= 7; }
 static int bar_h(struct shell *sh) { return taskbar_h(sh->server); }
 static bool bar10(struct shell *sh) { return bar_theme(sh)->version == 10; }
 static int start_w(struct shell *sh) { return bar10(sh) ? 48 : bar7(sh) ? W7_ORB + 2 : START_W; }
-static int menu_w(struct shell *sh) { return menu7(sh) ? W7_MENU_W : MENU_W; }
+static bool menu10(struct shell *sh) { return menu_theme(sh)->version == 10; }
+#define W10_MENU_W 660
+static int menu_w(struct shell *sh) { return menu10(sh) ? W10_MENU_W : menu7(sh) ? W7_MENU_W : MENU_W; }
 
 /* Windows 7 hover: a pale blue rounded box */
 static void hl7(cairo_t *cr, struct wlr_box b) {
@@ -1594,7 +1602,267 @@ static void draw_menu7(struct shell *sh) {
 	}
 }
 
+/* ---------------------------------------------------------------- Windows 10 Start */
+
+enum { S10_MENU = 1, S10_USER, S10_DOCS, S10_PICS, S10_SETTINGS, S10_POWER, S10_SIGNOUT, S10_LOCK,
+	S10_SLEEP = 3000, S10_SHUTDOWN, S10_RESTART, S10_APP = 10000, S10_TILE = 20000, S10_RESULT = 30000 };
+
+static const struct { const char *label, *icon, *cmd; } tiles10[6] = {
+	{"File Explorer", "explorer", "expede-explorer"}, {"Settings", "control-panel", "expede-settings"},
+	{"This PC", "computer", "expede-explorer computer:"}, {"Command Prompt", "cmd", "foot"},
+	{"Notepad", "notepad", "mousepad"}, {"Snipping Tool", "file-image", "expede-snip"},
+};
+
+static void hit10(struct shell *sh, int x, int y, int w, int h, int id) {
+	if (sh->n_hits10 < (int)(sizeof(sh->hits10) / sizeof(*sh->hits10)))
+		sh->hits10[sh->n_hits10++] = (struct hit10){{x, y, w, h}, id};
+}
+
+static void fill_a(cairo_t *cr, double x, double y, double w, double h, double v, double a) {
+	cairo_set_source_rgba(cr, v, v, v, a);
+	cairo_rectangle(cr, x, y, w, h);
+	cairo_fill(cr);
+}
+
+static void draw_menu10(struct shell *sh) {
+	struct server *srv = sh->server;
+	struct theme *t = menu_theme(sh);
+	if (sh->menu_glass && !sh->start_open)
+		wlr_scene_node_set_enabled(&sh->menu_glass->node, false);
+	if (!sh->start_open) {
+		if (sh->menu)
+			wlr_scene_node_set_enabled(&sh->menu->node, false);
+		return;
+	}
+	theme_use_fonts(t);
+	if (sh->tile_theme != desk_theme(sh)) {
+		sh->tile_theme = desk_theme(sh);
+		for (int i = 0; i < 6; i++)
+			sh->tile_img[i] = theme_icon(sh->tile_theme, tiles10[i].icon);
+	}
+	/* as tall as Windows 10's (640), less on small screens */
+	sh->menu_h = sh->h - bar_h(sh) > 680 ? 640 : sh->h - bar_h(sh) - 40;
+	int mw = W10_MENU_W, mh = sh->menu_h;
+	sh->n_hits10 = 0;
+	cairo_surface_t *c = canvas_new(mw, mh);
+	cairo_t *cr = cairo_create(c);
+	bool acrylic = srv->opt_transparency && srv->glass_buf;
+	cairo_set_source_rgba(cr, 0.12, 0.12, 0.12, acrylic ? 0.88 : 1);
+	cairo_paint(cr);
+	uint32_t acc = srv->accent_rgb;
+	int n;
+	struct app *apps = apps_all(&n);
+
+	if (sh->query[0]) {
+		/* typing in Start searches: "Best match", then the other apps */
+		int x = 48, y = 12;
+		draw_text(cr, "Segoe UI Semibold 9", "Best match", x + 16, y, 0, 0xffffff, 0, 0, 0, false);
+		y += 28;
+		for (int r = 0; r < sh->n_results && y < mh - 40; r++) {
+			struct app *a = &apps[sh->results[r]];
+			int rh = r == 0 ? 72 : 36, id = S10_RESULT + r;
+			if (r == 1) {
+				draw_text(cr, "Segoe UI Semibold 9", "Apps", x + 16, y + 8, 0, 0xffffff, 0, 0, 0, false);
+				y += 32;
+			}
+			bool hl = sh->hot10 == id || (sh->hot10 == 0 && r == sh->list_sel);
+			if (hl)
+				fill_a(cr, x, y, mw - x - 8, rh, 1, r == 0 ? 0.2 : 0.12);
+			int isz = r == 0 ? 48 : 24;
+			draw_scaled(cr, app_icon(t, a), x + 16, y + (rh - isz) / 2.0, isz);
+			draw_text(cr, r == 0 ? "Segoe UI 12" : "Segoe UI 9", a->name, x + 16 + isz + 12, y + (r == 0 ? 14 : 9),
+				mw - x - isz - 60, 0xffffff, 0, 0, 0, false);
+			if (r == 0)
+				draw_text(cr, "Segoe UI 9", "App", x + 16 + isz + 12, y + 40, 0, 0xbbbbbb, 0, 0, 0, false);
+			hit10(sh, x, y, mw - x - 8, rh, id);
+			y += rh;
+		}
+		if (!sh->n_results)
+			draw_text(cr, "Segoe UI 9", "No results", x + 16, y, 0, 0xbbbbbb, 0, 0, 0, false);
+	} else {
+		/* the A-Z list, with a letter above each group */
+		int lx = 48, lw = 270, y = 8 - sh->scroll10;
+		cairo_save(cr);
+		cairo_rectangle(cr, lx, 0, lw, mh);
+		cairo_clip(cr);
+		char last = 0;
+		for (int i = 0; i < n; i++) {
+			char L = apps[i].name[0];
+			if (L >= 'a' && L <= 'z')
+				L -= 32;
+			if (!(L >= 'A' && L <= 'Z'))
+				L = '#';
+			if (L != last) {
+				char hdr[2] = {L, 0};
+				if (y > -40 && y < mh)
+					draw_text(cr, "Segoe UI 9", hdr, lx + 16, y + 9, 0, 0xffffff, 0, 0, 0, false);
+				y += 36;
+				last = L;
+			}
+			if (y > -40 && y < mh) {
+				int id = S10_APP + i;
+				if (sh->hot10 == id)
+					fill_a(cr, lx, y, lw, 36, 1, 0.12);
+				/* desktop apps sit on an accent square, like Windows 10 */
+				cairo_set_source_rgb(cr, ((acc >> 16) & 255) / 255.0, ((acc >> 8) & 255) / 255.0, (acc & 255) / 255.0);
+				cairo_rectangle(cr, lx + 8, y + 2, 32, 32);
+				cairo_fill(cr);
+				draw_scaled(cr, app_icon(t, &apps[i]), lx + 12, y + 6, 24);
+				draw_text(cr, "Segoe UI 9", apps[i].name, lx + 52, y + 9, lw - 60, 0xffffff, 0, 0, 0, false);
+				if (y >= 0 && y + 36 <= mh)
+					hit10(sh, lx, y, lw, 36, id);
+			}
+			y += 36;
+		}
+		cairo_restore(cr);
+		/* tiles */
+		int tx = 48 + 270 + 24, ty = 44, ts = 100, gap = 4;
+		draw_text(cr, "Segoe UI 9", "Expede", tx, 14, 0, 0xffffff, 0, 0, 0, false);
+		for (int i = 0; i < 6; i++) {
+			int x = tx + (i % 3) * (ts + gap), y2 = ty + (i / 3) * (ts + gap), id = S10_TILE + i;
+			cairo_set_source_rgba(cr, ((acc >> 16) & 255) / 255.0, ((acc >> 8) & 255) / 255.0, (acc & 255) / 255.0,
+				acrylic ? 0.85 : 1);
+			cairo_rectangle(cr, x, y2, ts, ts);
+			cairo_fill(cr);
+			if (sh->hot10 == id) {
+				cairo_set_source_rgba(cr, 1, 1, 1, 0.6);
+				cairo_set_line_width(cr, 2);
+				cairo_rectangle(cr, x + 1, y2 + 1, ts - 2, ts - 2);
+				cairo_stroke(cr);
+			}
+			cairo_surface_t *img = sh->tile_img[i].s32;
+			if (!img) {
+				/* no Windows icon for it: the app's own (foot, Mousepad...) */
+				const char *exe = tiles10[i].cmd;
+				for (int k = 0; k < n && !img; k++)
+					if (apps[k].exec && !strncmp(apps[k].exec, exe, strlen(exe)))
+						img = app_icon(t, &apps[k]);
+			}
+			if (img)
+				draw_scaled(cr, img, x + (ts - 32) / 2.0, y2 + 26, 32);
+			draw_text(cr, "Segoe UI 8", tiles10[i].label, x + 8, y2 + ts - 22, ts - 12, 0xffffff, 0, 0, 0, false);
+			hit10(sh, x, y2, ts, ts, id);
+		}
+	}
+
+	/* the rail: menu at the top; account, Documents, Pictures, Settings and Power at the bottom */
+	int rw = sh->rail_open ? 256 : 48;
+	if (sh->rail_open) {
+		cairo_set_source_rgba(cr, 0.17, 0.17, 0.17, 0.98);
+		cairo_rectangle(cr, 0, 0, rw, mh);
+		cairo_fill(cr);
+	}
+	struct { int id; const char *glyph, *label; } rail[6] = {
+		{S10_MENU, "\uE700", "START"}, {S10_USER, "\uE77B", getenv("USER") ? getenv("USER") : "User"},
+		{S10_DOCS, "\uE8A5", "Documents"}, {S10_PICS, "\uE91B", "Pictures"}, {S10_SETTINGS, "\uE713", "Settings"},
+		{S10_POWER, "\uE7E8", "Power"},
+	};
+	for (int i = 0; i < 6; i++) {
+		int y = i == 0 ? 0 : mh - (6 - i) * 48;
+		if (sh->hot10 == rail[i].id)
+			fill_a(cr, 0, y, rw, 48, 1, 0.12);
+		draw_mdl2(cr, rail[i].glyph, 11, 24, y + 24, 0xffffff);
+		if (sh->rail_open)
+			draw_text(cr, i == 0 ? "Segoe UI Semibold 9" : "Segoe UI 9", rail[i].label, 56, y + 15, rw - 64, 0xffffff,
+				0, 0, 0, false);
+		hit10(sh, 0, y, rw, 48, rail[i].id);
+	}
+	/* the power and account menus pop up beside the rail */
+	if (sh->power_menu10 || sh->user_menu10) {
+		bool pw = sh->power_menu10;
+		const char *labels[3] = {pw ? "Sleep" : "Sign out", pw ? "Shut down" : "Change account settings", pw ? "Restart" : NULL};
+		int ids[3] = {pw ? S10_SLEEP : S10_SIGNOUT, pw ? S10_SHUTDOWN : S10_LOCK, S10_RESTART};
+		int cnt = pw ? 3 : 2, ph = cnt * 40 + 8, px = 48, py = pw ? mh - ph - 4 : mh - 5 * 48;
+		fill_a(cr, px, py, 220, ph, 0.17, 1);
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.15);
+		cairo_rectangle(cr, px + 0.5, py + 0.5, 219, ph - 1);
+		cairo_stroke(cr);
+		static const char *pglyph[3] = {"\uE708", "\uE7E8", "\uE777"};
+		for (int i = 0; i < cnt; i++) {
+			int y = py + 4 + i * 40;
+			if (sh->hot10 == ids[i])
+				fill_a(cr, px, y, 220, 40, 1, 0.12);
+			if (pw)
+				draw_mdl2(cr, pglyph[i], 10, px + 22, y + 20, 0xffffff);
+			draw_text(cr, "Segoe UI 9", labels[i], px + (pw ? 44 : 16), y + 11, 0, 0xffffff, 0, 0, 0, false);
+			hit10(sh, px, y, 220, 40, ids[i]);
+		}
+	}
+	cairo_destroy(cr);
+	int my = sh->h - bar_h(sh) - mh;
+	show(&sh->menu, srv->layer_menu, c, 0, my);
+	wlr_scene_node_set_enabled(&sh->menu->node, true);
+	if (acrylic) {
+		glass_backdrop(srv, &sh->menu_glass, srv->layer_menu, 0, my, 0, my, mw, mh);
+		if (sh->menu_glass)
+			wlr_scene_node_place_below(&sh->menu_glass->node, &sh->menu->node);
+	} else if (sh->menu_glass) {
+		wlr_scene_node_set_enabled(&sh->menu_glass->node, false);
+	}
+}
+
+static int hit10_at(struct shell *sh, double x, double y) {
+	struct wlr_box mb = {0, sh->h - bar_h(sh) - sh->menu_h, W10_MENU_W, sh->menu_h};
+	int id = 0;
+	for (int i = 0; i < sh->n_hits10; i++)
+		if (in_box(&sh->hits10[i].b, x - mb.x, y - mb.y))
+			id = sh->hits10[i].id; /* later ones (pop-ups) win */
+	return id;
+}
+
+static void launch_app(struct shell *sh, int app_index);
+
+static bool start10_motion(struct shell *sh, double x, double y) {
+	int id = hit10_at(sh, x, y);
+	if (id != sh->hot10) {
+		sh->hot10 = id;
+		draw_menu10(sh);
+	}
+	return x < W10_MENU_W && y >= sh->h - bar_h(sh) - sh->menu_h && y < sh->h - bar_h(sh);
+}
+
+static void start10_click(struct shell *sh, int id) {
+	bool keep_menus = id == S10_POWER || id == S10_USER;
+	if (!keep_menus && id < S10_SLEEP)
+		sh->power_menu10 = sh->user_menu10 = false;
+	switch (id) {
+	case S10_MENU: sh->rail_open = !sh->rail_open; break;
+	case S10_USER: sh->user_menu10 = !sh->user_menu10; sh->power_menu10 = false; break;
+	case S10_POWER: sh->power_menu10 = !sh->power_menu10; sh->user_menu10 = false; break;
+	case S10_DOCS: shell_toggle_start(sh); spawn("expede-explorer ~/Documents"); return;
+	case S10_PICS: shell_toggle_start(sh); spawn("expede-explorer ~/Pictures"); return;
+	case S10_SETTINGS: shell_toggle_start(sh); spawn("expede-settings"); return;
+	case S10_SIGNOUT: shell_toggle_start(sh); session_logoff(sh->server->session); return;
+	case S10_LOCK: shell_toggle_start(sh); spawn("expede-settings users"); return;
+	case S10_SLEEP: shell_toggle_start(sh); spawn("systemctl suspend"); return;
+	case S10_SHUTDOWN: shell_toggle_start(sh); session_turnoff_dialog(sh->server->session); return;
+	case S10_RESTART: shell_toggle_start(sh); spawn("systemctl reboot"); return;
+	default:
+		if (id >= S10_RESULT) {
+			int r = id - S10_RESULT;
+			if (r < sh->n_results)
+				launch_app(sh, sh->results[r]);
+			return;
+		}
+		if (id >= S10_TILE) {
+			const char *cmd = tiles10[id - S10_TILE].cmd;
+			shell_toggle_start(sh);
+			spawn(cmd);
+			return;
+		}
+		if (id >= S10_APP) {
+			launch_app(sh, id - S10_APP);
+			return;
+		}
+	}
+	draw_menu10(sh);
+}
+
 static void draw_menu(struct shell *sh) {
+	if (menu10(sh)) {
+		draw_menu10(sh);
+		return;
+	}
 	if (menu7(sh)) {
 		draw_menu7(sh);
 		return;
@@ -1760,6 +2028,9 @@ bool shell_start_open(struct shell *sh) {
 
 void shell_toggle_start(struct shell *sh) {
 	sh->start_open = !sh->start_open;
+	sh->hot10 = 0;
+	sh->scroll10 = 0;
+	sh->rail_open = sh->power_menu10 = sh->user_menu10 = false;
 	sh->menu_hot = -1;
 	sh->query[0] = 0;
 	sh->all_mode = false;
@@ -1818,6 +2089,8 @@ bool shell_motion(struct shell *sh, double x, double y, bool over_view) {
 	if (sh->tv_open)
 		return tv_motion(sh, x, y);
 	if (sh->action_open && ac_motion(sh, x, y))
+		return true;
+	if (sh->start_open && menu10(sh) && start10_motion(sh, x, y))
 		return true;
 	if (sh->vol_drag) {
 		vol_drag_to(sh, y);
@@ -1936,6 +2209,14 @@ bool shell_button(struct shell *sh, double x, double y, bool pressed, bool dbl, 
 	bool on_bar = y >= sh->h - bar_h(sh);
 	if (sh->tv_open && !on_bar)
 		return tv_button(sh, x, y, pressed);
+	if (sh->start_open && menu10(sh) && x < W10_MENU_W && !on_bar && y >= sh->h - bar_h(sh) - sh->menu_h) {
+		if (!pressed) {
+			int id = hit10_at(sh, x, y);
+			if (id)
+				start10_click(sh, id);
+		}
+		return true;
+	}
 	if (sh->action_open) {
 		if (ac_button(sh, x, y, pressed))
 			return true;
@@ -2203,6 +2484,17 @@ bool shell_key(struct shell *sh, uint32_t sym, const char *utf8) {
 
 bool shell_axis(struct shell *sh, double x, double y, double delta) {
 	bool on_bar = y >= sh->h - bar_h(sh);
+	if (sh->start_open && menu10(sh) && x < W10_MENU_W && !on_bar) {
+		int n;
+		apps_all(&n);
+		int max = n * 36 + 27 * 36 - sh->menu_h;
+		sh->scroll10 += delta > 0 ? 108 : -108;
+		if (sh->scroll10 > max) sh->scroll10 = max;
+		if (sh->scroll10 < 0) sh->scroll10 = 0;
+		sh->hot10 = 0;
+		draw_menu10(sh);
+		return true;
+	}
 	if ((sh->bat_open && in_box(&sh->bat_box, x, y)) ||
 			(on_bar && in_box(&sh->bat_icon_box, x, y - (sh->h - bar_h(sh))))) {
 		shell_brightness_key(sh, delta < 0 ? 5 : -5);
@@ -2578,7 +2870,8 @@ void shell_reconfigure(struct shell *sh) {
 		if (sh->items[i].icon)
 			sh->items[i].img = theme_icon(menu_theme(sh), sh->items[i].icon);
 	sh->modern = menu7(sh) || sh->server->opt_modern_start;
-	sh->menu_h = menu7(sh) ? W7_MENU_H : MENU_H + (sh->modern ? SEARCH_H : 0);
+	sh->menu_h = menu10(sh) ? (sh->h - bar_h(sh) > 680 ? 640 : sh->h - bar_h(sh) - 40) :
+		menu7(sh) ? W7_MENU_H : MENU_H + (sh->modern ? SEARCH_H : 0);
 	layout_menu(sh);
 	tick(sh);
 	draw_desktop(sh);
@@ -2636,7 +2929,8 @@ struct shell *shell_create(struct server *s) {
 	sh->server = s;
 	sh->menu_hot = sh->task_hot = sh->icon_sel = sh->list_hot = sh->list_sel = sh->cascade_hot = -1;
 	sh->modern = menu7(sh) || s->opt_modern_start;
-	sh->menu_h = menu7(sh) ? W7_MENU_H : MENU_H + (sh->modern ? SEARCH_H : 0);
+	sh->menu_h = menu10(sh) ? (sh->h - bar_h(sh) > 680 ? 640 : sh->h - bar_h(sh) - 40) :
+		menu7(sh) ? W7_MENU_H : MENU_H + (sh->modern ? SEARCH_H : 0);
 	tick(sh);
 	apps_load();
 	update_results(sh);

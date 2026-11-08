@@ -155,6 +155,8 @@ def build(xp, themes):
     head = open(os.path.join(luna, 'normalblue.ini'), errors='replace').readline()
     if 'Windows 7' in head:
         return build7(xp, themes)
+    if 'Windows 10' in head:
+        return build7(xp, themes, name='Expede-10')
     out = os.path.join(themes, 'Expede-XP')
     t = Theme(luna, os.path.join(out, 'gtk-3.0', 'assets'))
     states4 = ['normal', 'hover', 'active', 'disabled']
@@ -230,11 +232,12 @@ def build(xp, themes):
     return out
 
 
-def build7(src, themes):
+def build7(src, themes, name='Expede-7'):
     """Windows 7: the same widget set, from w7rip's decompiled aero.msstyles."""
     luna = os.path.join(src, 'luna')
     ini = read_ini(os.path.join(luna, 'normalblue.ini'))
-    out = os.path.join(themes, 'Expede-7')
+    theme_name = name
+    out = os.path.join(themes, theme_name)
     t = Theme(luna, os.path.join(out, 'gtk-3.0', 'assets'))
 
     def name(sec, key='imagefile'):
@@ -280,6 +283,8 @@ def build7(src, themes):
     t.save('expander-open', frame(exp, 2, 1))
 
     css = CSS + CSS7
+    if theme_name == 'Expede-10':
+        css = css.replace('#cce8ff', '#cce8ff').replace('Expede 7: Aero', 'Expede 10')
     for k, v in {
         'Expede XP: Luna': 'Expede 7: Aero', '#ece9d8': '#f0f0f0', '#316ac5': '#3399ff', '#7f9db9': '#abadb3',
         '#aca899': '#a0a0a0', 'Tahoma, sans-serif': '"Segoe UI", sans-serif', 'font-size: 8pt': 'font-size: 9pt',
@@ -313,9 +318,10 @@ def build7(src, themes):
     with open(os.path.join(gtk4, 'gtk.css'), 'w') as f:
         f.write(re.sub(r'^\s*-GtkScrollbar[^\n]*\n', '', css, flags=re.M))
     with open(os.path.join(out, 'index.theme'), 'w') as f:
-        f.write('[Desktop Entry]\nType=X-GNOME-Metatheme\nName=Expede 7\n'
-                'Comment=Windows 7 Aero, drawn from your own Windows files\n\n'
-                '[X-GNOME-Metatheme]\nGtkTheme=Expede-7\n')
+        label = theme_name.replace('-', ' ')
+        f.write(f'[Desktop Entry]\nType=X-GNOME-Metatheme\nName={label}\n'
+                'Comment=Windows, drawn from your own Windows files\n\n'
+                f'[X-GNOME-Metatheme]\nGtkTheme={theme_name}\n')
     return out
 
 
