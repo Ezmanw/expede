@@ -12,13 +12,16 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 #include "expede.h"
 
 enum state { ST_WELCOME, ST_LOGGING_ON, ST_DESKTOP, ST_LOGGING_OFF, ST_SHUTTING_DOWN, ST_TURNOFF };
-enum hot { HOT_NONE, HOT_ACCOUNT, HOT_GO, HOT_EASE, HOT_USER0 = 100, HOT_SESSION0 = 200, HOT_TURNOFF, HOT_STANDBY, HOT_OFF, HOT_RESTART, HOT_CANCEL, HOT_W7_ARROW, HOT_W7_MENU_RESTART, HOT_W7_MENU_SLEEP, HOT_W7_MENU_LOGOFF };
+enum hot { HOT_NONE, HOT_ACCOUNT, HOT_GO, HOT_EASE, HOT_TURNOFF, HOT_STANDBY, HOT_OFF, HOT_RESTART, HOT_CANCEL,
+	HOT_W7_ARROW, HOT_W7_MENU_RESTART, HOT_W7_MENU_SLEEP, HOT_W7_MENU_LOGOFF, HOT_P10_SLEEP, HOT_P10_OFF, HOT_P10_RESTART,
+	HOT_LOCK, HOT_USER0 = 1000, HOT_SESSION0 = 2000 };
 enum after { AFTER_NONE, AFTER_POWEROFF, AFTER_REBOOT };
 
 struct session {
@@ -38,6 +41,11 @@ struct session {
 	cairo_surface_t *w7_bg, *w7_branding[2], *w7_tile_frame, *w7_spinner, *w7_ease;
 	cairo_surface_t *w7_go[3], *w7_shutdown[3], *w7_shutdown_arrow[3], *w7_button[3];
 	cairo_surface_t *w7_power_glyph, *w7_arrow_glyph, *w7_tile_small[2];
+	/* Windows 10: the lock screen (a big clock over the picture), then sign-in over it blurred */
+	bool locked;
+	cairo_surface_t *w10_lock, *w10_lock_blur;
+	int w10_lock_w, w10_lock_h;
+	struct wl_event_source *clock_timer;
 	/* login manager (expede -g under greetd): accounts, password, which desktop to start */
 	bool greeter;
 	struct account { char name[64], full[96]; } users[16];
@@ -78,7 +86,13 @@ static struct wlr_box account_box(struct session *se) {
 }
 
 /* sign-in: the password box under the name, the arrow just right of it */
+static bool logon10(struct session *se) {
+	return theme_of(se->server, se->server->st_logon)->version == 10;
+}
+
 static struct wlr_box pw_box(struct session *se) {
+	if (logon10(se))
+		return (struct wlr_box){(se->w - 296) / 2, se->h / 2 + 90, 264, 32};
 	if (logon7(se))
 		return (struct wlr_box){(se->w - 225) / 2 - 20, se->h / 2 + 70, 225, 25};
 	struct wlr_box a = {se->w / 2 + 26, content_mid(se) - 36 - (se->n_users - 1) * 40 + se->user_sel * 80, 308, 72};
@@ -86,6 +100,10 @@ static struct wlr_box pw_box(struct session *se) {
 }
 
 static struct wlr_box w7_go_box(struct session *se) {
+	if (logon10(se)) {
+		struct wlr_box p = pw_box(se);
+		return (struct wlr_box){p.x + p.width, p.y, 32, 32};
+	}
 	if (se->greeter && se->user_sel >= 0) {
 		struct wlr_box p = pw_box(se);
 		return logon7(se) ? (struct wlr_box){p.x + p.width + 4, p.y - 7, 38, 38} : (struct wlr_box){p.x + p.width + 6, p.y - 2, 24, 24};
@@ -103,6 +121,8 @@ static struct wlr_box user_box(struct session *se, int i) {
 }
 
 static struct wlr_box ease_box(struct session *se) {
+	if (logon10(se))
+		return (struct wlr_box){se->w - 2 * 48 - 16, se->h - 64, 48, 48};
 	if (logon7(se))
 		return (struct wlr_box){32, se->h - 32 - 28, 35, 28};
 	return (struct wlr_box){25, se->h - bottom_h(se) + 56, 260, 20};
@@ -110,10 +130,14 @@ static struct wlr_box ease_box(struct session *se) {
 
 static struct wlr_box session_row(struct session *se, int i) {
 	struct wlr_box e = ease_box(se);
+	if (logon10(se))
+		return (struct wlr_box){e.x - 192 + 48, e.y - 8 - (se->n_sessions - i) * 40, 240, 40};
 	return (struct wlr_box){e.x, e.y - 8 - (se->n_sessions - i) * 26, 240, 26};
 }
 
 static struct wlr_box turnoff_box(struct session *se) {
+	if (logon10(se))
+		return (struct wlr_box){se->w - 48 - 16, se->h - 64, 48, 48};
 	if (logon7(se))
 		return (struct wlr_box){se->w - 32 - 21 - 38, se->h - 32 - 28, 38, 28};
 	int y = se->h - bottom_h(se) + 22;
@@ -441,7 +465,245 @@ static void draw_welcome7(struct session *se, cairo_t *cr) {
 	}
 }
 
+/* Windows 10's lock picture, and a blurred, dimmed copy for the sign-in screen */
+static void load_w10_lock(struct session *se) {
+	if (se->w10_lock && se->w10_lock_w == se->w && se->w10_lock_h == se->h)
+		return;
+	struct theme *t = theme_of(se->server, se->server->st_logon);
+	char path[700];
+	snprintf(path, sizeof(path), "%s/logon/lock-1.jpg", t->dir);
+	cairo_surface_t *img = theme_load_image(path);
+	if (!img)
+		return;
+	if (se->w10_lock)
+		cairo_surface_destroy(se->w10_lock);
+	if (se->w10_lock_blur)
+		cairo_surface_destroy(se->w10_lock_blur);
+	/* cover the screen, cropping like Windows does */
+	int iw = cairo_image_surface_get_width(img), ih = cairo_image_surface_get_height(img);
+	double k = fmax((double)se->w / iw, (double)se->h / ih);
+	se->w10_lock = cairo_image_surface_create(CAIRO_FORMAT_RGB24, se->w, se->h);
+	cairo_t *cr = cairo_create(se->w10_lock);
+	cairo_translate(cr, (se->w - iw * k) / 2, (se->h - ih * k) / 2);
+	cairo_scale(cr, k, k);
+	cairo_set_source_surface(cr, img, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	/* blur: shrink to 1/8, box-blur three times, then scale back up smoothly */
+	int sw = se->w / 8 + 1, sh = se->h / 8 + 1;
+	cairo_surface_t *small = cairo_image_surface_create(CAIRO_FORMAT_RGB24, sw, sh);
+	cr = cairo_create(small);
+	cairo_scale(cr, (double)sw / se->w, (double)sh / se->h);
+	cairo_set_source_surface(cr, se->w10_lock, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_flush(small);
+	uint32_t *px = (uint32_t *)cairo_image_surface_get_data(small);
+	int st = cairo_image_surface_get_stride(small) / 4, r = 4;
+	uint32_t *tmp = malloc(sizeof(uint32_t) * (sw > sh ? sw : sh));
+	for (int pass = 0; pass < 3; pass++)
+		for (int dir = 0; dir < 2; dir++) {
+			int lines = dir ? sw : sh, len = dir ? sh : sw, step = dir ? st : 1;
+			for (int l = 0; l < lines; l++) {
+				uint32_t *line = dir ? px + l : px + l * st;
+				for (int i = 0; i < len; i++)
+					tmp[i] = line[i * step];
+				for (int i = 0; i < len; i++) {
+					unsigned sum[3] = {0}, n = 0;
+					for (int k = i - r; k <= i + r; k++)
+						if (k >= 0 && k < len) {
+							for (int c = 0; c < 3; c++)
+								sum[c] += (tmp[k] >> (c * 8)) & 255;
+							n++;
+						}
+					line[i * step] = 0xff000000u | (sum[2] / n) << 16 | (sum[1] / n) << 8 | sum[0] / n;
+				}
+			}
+		}
+	free(tmp);
+	cairo_surface_mark_dirty(small);
+	se->w10_lock_blur = cairo_image_surface_create(CAIRO_FORMAT_RGB24, se->w, se->h);
+	cr = cairo_create(se->w10_lock_blur);
+	cairo_scale(cr, (double)se->w / sw, (double)se->h / sh);
+	cairo_set_source_surface(cr, small, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BILINEAR);
+	cairo_pattern_set_extend(cairo_get_source(cr), CAIRO_EXTEND_PAD);
+	cairo_paint(cr);
+	cairo_destroy(cr);
+	cairo_surface_destroy(small);
+	cairo_surface_destroy(img);
+	se->w10_lock_w = se->w;
+	se->w10_lock_h = se->h;
+}
+
+static void circle_picture(cairo_t *cr, cairo_surface_t *pic, double cx, double cy, double r) {
+	cairo_save(cr);
+	cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
+	cairo_clip(cr);
+	if (pic) {
+		stretch(cr, pic, cx - r, cy - r, 2 * r, 2 * r);
+	} else {
+		rgb(cr, 0x9a9a9a);
+		cairo_paint(cr);
+	}
+	cairo_restore(cr);
+}
+
+static void draw_welcome10(struct session *se, cairo_t *cr) {
+	int w = se->w, h = se->h;
+	struct theme *t = theme_of(se->server, se->server->st_logon);
+	theme_use_fonts(t);
+	load_w10_lock(se);
+	if (se->locked && se->state == ST_WELCOME) {
+		/* the lock screen: the picture and a big clock, bottom left */
+		if (se->w10_lock)
+			draw_surface(cr, se->w10_lock, 0, 0);
+		time_t now = time(NULL);
+		struct tm tm;
+		localtime_r(&now, &tm);
+		char clock[16], date[64];
+		strftime(clock, sizeof(clock), se->server->opt_clock24 ? "%H:%M" : "%-I:%M", &tm);
+		strftime(date, sizeof(date), "%A, %B %-d", &tm);
+		draw_text(cr, "Segoe UI Light 80", clock, 48, h - 300, 0, 0xffffff, 0, 1, 0x404040, false);
+		draw_text(cr, "Segoe UI Light 30", date, 52, h - 170, 0, 0xffffff, 0, 1, 0x404040, false);
+		return;
+	}
+	if (se->w10_lock_blur)
+		draw_surface(cr, se->w10_lock_blur, 0, 0);
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.25);
+	cairo_paint(cr);
+	cairo_surface_t *pic = t->user_pic ? t->user_pic : se->server->theme.user_pic;
+	if (se->state != ST_WELCOME) {
+		/* "Welcome" with Windows 10's ring of dots */
+		const char *msg = se->state == ST_LOGGING_ON ? "Welcome" : se->state == ST_LOGGING_OFF ? "Signing out" :
+			"Shutting down";
+		if (se->state == ST_LOGGING_ON) {
+			circle_picture(cr, pic, w / 2, h / 2 - 110, 96);
+		}
+		int tw = text_width("Segoe UI Light 20", msg);
+		draw_text(cr, "Segoe UI Light 20", msg, (w - tw) / 2, h / 2 + 10, 0, 0xffffff, 0, 0, 0, false);
+		for (int i = 0; i < 5; i++) {
+			double a = -M_PI / 2 + i * 0.35;
+			cairo_arc(cr, w / 2 + cos(a) * 14, h / 2 + 70 + sin(a) * 14, 2, 0, 2 * M_PI);
+			rgb(cr, 0xffffff);
+			cairo_fill(cr);
+		}
+		return;
+	}
+	/* the selected account: round picture, name, password */
+	int sel = se->greeter ? (se->user_sel >= 0 ? se->user_sel : 0) : -1;
+	circle_picture(cr, pic, w / 2, h / 2 - 110, 96);
+	const char *name = sel >= 0 ? se->users[sel].full : getenv("USER") ? getenv("USER") : "User";
+	int nw = text_width("Segoe UI Light 24", name);
+	draw_text(cr, "Segoe UI Light 24", name, (w - nw) / 2, h / 2 + 20, 0, 0xffffff, 0, 0, 0, false);
+	struct wlr_box p = pw_box(se), g = w7_go_box(se);
+	if (se->greeter) {
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.9);
+		cairo_rectangle(cr, p.x, p.y, p.width, p.height);
+		cairo_fill(cr);
+		int n = strlen(se->password);
+		if (!n)
+			draw_text(cr, "Segoe UI 11", "Password", p.x + 10, p.y + 6, 0, 0x6b6b6b, 0, 0, 0, false);
+		char dots[128] = "";
+		for (int i = 0; i < n && i < 30; i++)
+			strcat(dots, "\u25cf");
+		int dw = n ? draw_text(cr, "Segoe UI 9", dots, p.x + 10, p.y + 8, p.width - 20, 0x000000, 0, 0, 0, false) : 0;
+		rgb(cr, 0x000000);
+		cairo_rectangle(cr, p.x + 10 + dw + (n ? 1 : 0), p.y + 7, 1, p.height - 14);
+		cairo_fill(cr);
+		/* the arrow sits in an accent square at the end of the box */
+		uint32_t acc = se->server->accent_rgb;
+		cairo_set_source_rgb(cr, ((acc >> 16) & 255) / 255.0, ((acc >> 8) & 255) / 255.0, (acc & 255) / 255.0);
+		if (se->hot == HOT_GO)
+			cairo_set_source_rgba(cr, ((acc >> 16) & 255) / 255.0 * 1.15, ((acc >> 8) & 255) / 255.0 * 1.15,
+				(acc & 255) / 255.0 * 1.15, 1);
+		cairo_rectangle(cr, g.x, g.y, g.width, g.height);
+		cairo_fill(cr);
+		draw_mdl2(cr, "\uE72A", 11, g.x + g.width / 2.0, g.y + g.height / 2.0, 0xffffff);
+		if (se->error[0]) {
+			int ew = text_width("Segoe UI 10", se->error);
+			draw_text(cr, "Segoe UI 10", se->error, (w - ew) / 2, p.y + 46, 0, 0xffffff, 0, 0, 0, false);
+		}
+		/* other accounts, bottom left */
+		if (se->n_users > 1)
+			for (int i = 0; i < se->n_users; i++) {
+				int y = h - 40 - (se->n_users - i) * 56;
+				bool hot = se->hot == (enum hot)(HOT_USER0 + i);
+				if (hot || i == sel) {
+					cairo_set_source_rgba(cr, 1, 1, 1, i == sel ? 0.25 : 0.15);
+					cairo_rectangle(cr, 16, y, 240, 52);
+					cairo_fill(cr);
+				}
+				circle_picture(cr, pic, 16 + 26, y + 26, 20);
+				draw_text(cr, "Segoe UI 11", se->users[i].full, 16 + 56, y + 14, 180, 0xffffff, 0, 0, 0, false);
+			}
+	} else {
+		/* no password to type: Windows 10 shows a Sign in button */
+		int bw = 120;
+		struct wlr_box b = {(w - bw) / 2, p.y, bw, 32};
+		cairo_set_source_rgba(cr, 1, 1, 1, se->hot == HOT_ACCOUNT ? 0.4 : 0.25);
+		cairo_rectangle(cr, b.x, b.y, b.width, b.height);
+		cairo_fill(cr);
+		int tw = text_width("Segoe UI 11", "Sign in");
+		draw_text(cr, "Segoe UI 11", "Sign in", b.x + (bw - tw) / 2, b.y + 6, 0, 0xffffff, 0, 0, 0, false);
+	}
+	/* bottom right: network, ease of access (which desktop to start), power */
+	struct wlr_box e = ease_box(se), pw = turnoff_box(se);
+	draw_mdl2(cr, "\uE701", 13, e.x - 48 + 24, e.y + 24, 0xffffff);
+	if (se->hot == HOT_EASE || se->session_menu) {
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.15);
+		cairo_rectangle(cr, e.x, e.y, e.width, e.height);
+		cairo_fill(cr);
+	}
+	draw_mdl2(cr, "\uE776", 13, e.x + 24, e.y + 24, 0xffffff);
+	if (se->hot == HOT_TURNOFF || se->w7_power_menu) {
+		cairo_set_source_rgba(cr, 1, 1, 1, 0.15);
+		cairo_rectangle(cr, pw.x, pw.y, pw.width, pw.height);
+		cairo_fill(cr);
+	}
+	draw_mdl2(cr, "\uE7E8", 13, pw.x + 24, pw.y + 24, 0xffffff);
+	if (se->w7_power_menu) {
+		static const char *labels[3] = {"Sleep", "Shut down", "Restart"};
+		static const enum hot hots[3] = {HOT_P10_SLEEP, HOT_P10_OFF, HOT_P10_RESTART};
+		int mx = w - 16 - 200, my = pw.y - 8 - 3 * 40;
+		rgb(cr, 0x2b2b2b);
+		cairo_rectangle(cr, mx, my, 200, 3 * 40);
+		cairo_fill(cr);
+		for (int i = 0; i < 3; i++) {
+			if (se->hot == hots[i]) {
+				rgb(cr, 0x414141);
+				cairo_rectangle(cr, mx, my + i * 40, 200, 40);
+				cairo_fill(cr);
+			}
+			draw_text(cr, "Segoe UI 10", labels[i], mx + 16, my + i * 40 + 10, 0, 0xffffff, 0, 0, 0, false);
+		}
+	}
+	if (se->greeter && se->session_menu && se->n_sessions) {
+		struct wlr_box top = session_row(se, 0);
+		rgb(cr, 0x2b2b2b);
+		cairo_rectangle(cr, top.x, top.y, top.width, se->n_sessions * 40);
+		cairo_fill(cr);
+		for (int i = 0; i < se->n_sessions; i++) {
+			struct wlr_box r = session_row(se, i);
+			if (se->hot == (enum hot)(HOT_SESSION0 + i)) {
+				rgb(cr, 0x414141);
+				cairo_rectangle(cr, r.x, r.y, r.width, r.height);
+				cairo_fill(cr);
+			}
+			char lbl[96];
+			snprintf(lbl, sizeof(lbl), "%s%s", i == se->session_sel ? "\u2713  " : "     ", se->sessions[i].name);
+			draw_text(cr, "Segoe UI 10", lbl, r.x + 12, r.y + 10, r.width - 20, 0xffffff, 0, 0, 0, false);
+		}
+	}
+}
+
 static void draw_welcome(struct session *se, cairo_t *cr) {
+	if (logon10(se)) {
+		draw_welcome10(se, cr);
+		return;
+	}
 	if (logon7(se)) {
 		draw_welcome7(se, cr);
 		return;
@@ -557,6 +819,15 @@ static void close_all_windows(struct server *s, bool force) {
 	}
 }
 
+/* the lock screen's clock */
+static int on_clock(void *data) {
+	struct session *se = data;
+	if (se->locked && se->state == ST_WELCOME)
+		redraw(se);
+	wl_event_source_timer_update(se->clock_timer, 30000);
+	return 0;
+}
+
 static int on_timer(void *data) {
 	struct session *se = data;
 	struct server *s = se->server;
@@ -578,6 +849,7 @@ static int on_timer(void *data) {
 			wl_display_terminate(s->display);
 			break;
 		}
+		se->locked = logon10(se);
 		set_state(se, ST_WELCOME, 0);
 		break;
 	case ST_SHUTTING_DOWN:
@@ -840,7 +1112,41 @@ bool session_active(struct session *se) {
 	return se->state != ST_DESKTOP;
 }
 
+static enum hot hot_at10(struct session *se, double x, double y) {
+	if (se->locked)
+		return HOT_LOCK;
+	if (se->w7_power_menu) {
+		int mx = se->w - 16 - 200, my = turnoff_box(se).y - 8 - 3 * 40;
+		static const enum hot hots[3] = {HOT_P10_SLEEP, HOT_P10_OFF, HOT_P10_RESTART};
+		for (int i = 0; i < 3; i++)
+			if (in_box((struct wlr_box){mx, my + i * 40, 200, 40}, x, y))
+				return hots[i];
+	}
+	if (se->greeter && se->session_menu)
+		for (int i = 0; i < se->n_sessions; i++)
+			if (in_box(session_row(se, i), x, y))
+				return HOT_SESSION0 + i;
+	if (in_box(turnoff_box(se), x, y))
+		return HOT_TURNOFF;
+	if (se->greeter && in_box(ease_box(se), x, y))
+		return HOT_EASE;
+	if (se->greeter) {
+		if (in_box(w7_go_box(se), x, y))
+			return HOT_GO;
+		for (int i = 0; se->n_users > 1 && i < se->n_users; i++)
+			if (in_box((struct wlr_box){16, se->h - 40 - (se->n_users - i) * 56, 240, 52}, x, y))
+				return HOT_USER0 + i;
+	} else {
+		struct wlr_box p = pw_box(se);
+		if (in_box((struct wlr_box){(se->w - 120) / 2, p.y, 120, 32}, x, y))
+			return HOT_ACCOUNT;
+	}
+	return HOT_NONE;
+}
+
 static enum hot hot_at(struct session *se, double x, double y) {
+	if (se->state == ST_WELCOME && logon10(se))
+		return hot_at10(se, x, y);
 	if (se->state == ST_WELCOME && se->greeter) {
 		if (se->session_menu)
 			for (int i = 0; i < se->n_sessions; i++)
@@ -913,6 +1219,25 @@ void session_button(struct session *se, double x, double y, bool pressed) {
 	if (p != h || h == HOT_NONE) {
 		redraw(se);
 		return;
+	}
+	if (h == HOT_LOCK) {
+		se->locked = false;
+		redraw(se);
+		return;
+	}
+	if (logon10(se) && se->state == ST_WELCOME) {
+		switch (h) {
+		case HOT_TURNOFF: se->w7_power_menu = !se->w7_power_menu; redraw(se); return;
+		case HOT_P10_SLEEP:
+			se->w7_power_menu = false;
+			redraw(se);
+			if (!getenv("EXPEDE_NO_POWEROFF"))
+				spawn("systemctl suspend");
+			return;
+		case HOT_P10_OFF: se->w7_power_menu = false; shut_down(se, AFTER_POWEROFF); return;
+		case HOT_P10_RESTART: se->w7_power_menu = false; shut_down(se, AFTER_REBOOT); return;
+		default: break;
+		}
 	}
 	if (se->greeter && se->state == ST_WELCOME) {
 		if (h >= HOT_SESSION0 && h < HOT_SESSION0 + se->n_sessions) {
@@ -988,6 +1313,26 @@ void session_button(struct session *se, double x, double y, bool pressed) {
 }
 
 void session_key(struct session *se, uint32_t sym, const char *utf8) {
+	if (se->state == ST_WELCOME && logon10(se)) {
+		if (se->locked) {
+			/* any key lifts the lock screen */
+			se->locked = false;
+			redraw(se);
+			return;
+		}
+		if (sym == XKB_KEY_Escape && !se->session_menu && !se->w7_power_menu) {
+			se->locked = true;
+			memset(se->password, 0, sizeof(se->password));
+			se->error[0] = 0;
+			redraw(se);
+			return;
+		}
+		se->w7_power_menu = false;
+		if (!se->greeter && (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter)) {
+			set_state(se, ST_LOGGING_ON, 1800);
+			return;
+		}
+	}
 	if (se->greeter && se->state == ST_WELCOME) {
 		size_t n = strlen(se->password);
 		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
@@ -1077,6 +1422,11 @@ struct session *session_create(struct server *s, bool autologin) {
 	}
 
 	se->timer = wl_event_loop_add_timer(wl_display_get_event_loop(s->display), on_timer, se);
+	se->locked = logon10(se);
+	if (se->greeter && logon10(se) && se->user_sel < 0 && se->n_users)
+		se->user_sel = 0; /* Windows 10 always has someone picked */
+	se->clock_timer = wl_event_loop_add_timer(wl_display_get_event_loop(s->display), on_clock, se);
+	wl_event_source_timer_update(se->clock_timer, 30000);
 	server_screen(s, &se->w, &se->h);
 	if (autologin) {
 		/* XP skips the Welcome screen for a single account with no password */
