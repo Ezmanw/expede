@@ -63,11 +63,97 @@ struct keyboard {
 static struct server *the_server;
 static void snip_begin(struct server *s);
 
+static struct output_conf *output_conf(struct server *s, const char *name);
+
+/* the screen with the taskbar: the one marked primary, else the first one plugged in */
+static struct wlr_output *primary_output(struct server *s) {
+	struct output *o, *first = NULL;
+	wl_list_for_each_reverse(o, &s->outputs, link) {
+		if (!o->wlr_output->enabled)
+			continue;
+		if (!first)
+			first = o;
+		struct output_conf *c = output_conf(s, o->wlr_output->name);
+		if (c && c->primary)
+			return o->wlr_output;
+	}
+	return first ? first->wlr_output : NULL;
+}
+
 void server_screen(struct server *s, int *w, int *h) {
-	struct wlr_box box;
-	wlr_output_layout_get_box(s->output_layout, NULL, &box);
-	*w = box.width ? box.width : 1024;
-	*h = box.height ? box.height : 768;
+	struct wlr_output *p = primary_output(s);
+	*w = *h = 0;
+	if (p)
+		wlr_output_effective_resolution(p, w, h);
+	if (!*w) *w = 1024;
+	if (!*h) *h = 768;
+}
+
+struct wlr_box server_output_box(struct server *s, double x, double y) {
+	struct wlr_output *wo = wlr_output_layout_output_at(s->output_layout, x, y);
+	if (!wo)
+		wo = primary_output(s);
+	struct wlr_box b = {0};
+	if (wo)
+		wlr_output_layout_get_box(s->output_layout, wo, &b);
+	if (b.width <= 0)
+		server_screen(s, &b.width, &b.height);
+	return b;
+}
+
+struct wlr_box server_work_area(struct server *s, double x, double y) {
+	struct wlr_box b = server_output_box(s, x, y);
+	/* the taskbar lives on the primary screen, which sits at 0,0 */
+	if (b.x == 0 && b.y == 0)
+		b.height -= taskbar_h(s);
+	return b;
+}
+
+int server_other_outputs(struct server *s, struct wlr_box *boxes, int max) {
+	int n = 0;
+	struct wlr_output *p = primary_output(s);
+	struct output *o;
+	wl_list_for_each_reverse(o, &s->outputs, link) {
+		struct wlr_box b;
+		if (o->wlr_output == p || !o->wlr_output->enabled || n >= max)
+			continue;
+		wlr_output_layout_get_box(s->output_layout, o->wlr_output, &b);
+		if (b.width > 0 && !(b.x == 0 && b.y == 0))
+			boxes[n++] = b;
+	}
+	return n;
+}
+
+static enum wl_output_transform rotation_transform(int deg) {
+	return deg == 90 ? WL_OUTPUT_TRANSFORM_90 : deg == 180 ? WL_OUTPUT_TRANSFORM_180 :
+		deg == 270 ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_NORMAL;
+}
+
+/* Windows places the primary screen at 0,0 and the others where Display Settings
+ * dragged them (or in a row to its right); Duplicate stacks them all on it */
+static void arrange_outputs(struct server *s) {
+	struct wlr_output *p = primary_output(s);
+	int pw = 0, ph = 0;
+	if (p)
+		wlr_output_effective_resolution(p, &pw, &ph);
+	int nx = pw;
+	struct output *o;
+	wl_list_for_each_reverse(o, &s->outputs, link) {
+		struct wlr_output *wo = o->wlr_output;
+		struct output_conf *c = output_conf(s, wo->name);
+		int x = 0, y = 0, w, h;
+		wlr_output_effective_resolution(wo, &w, &h);
+		if (wo == p || s->display_mode == 1) {
+			x = y = 0;
+		} else if (c && c->has_pos) {
+			x = c->x;
+			y = c->y;
+		} else {
+			x = nx;
+			nx += w;
+		}
+		wlr_output_layout_add(s->output_layout, wo, x, y);
+	}
 }
 
 void spawn(const char *cmd) {
@@ -615,11 +701,14 @@ static void view_set_maximized(struct view *v, bool max) {
 		return;
 	int sw, sh;
 	server_screen(v->server, &sw, &sh);
+	struct wlr_box wa = server_work_area(v->server, v->x + view_frame_w(v) / 2.0, v->y + 10);
 	if (max) {
 		v->saved = (struct wlr_box){v->x, v->y, v->cw, v->ch};
 		v->maximized = true;
-		v->x = 0;
-		v->y = 0;
+		v->x = wa.x;
+		v->y = wa.y;
+		sw = wa.width;
+		sh = wa.height + taskbar_h(v->server);
 		wlr_xdg_toplevel_set_size(v->xt, sw, sh - taskbar_h(v->server) - caption_h(v));
 	} else {
 		v->maximized = false;
@@ -640,9 +729,13 @@ static void view_set_fullscreen(struct view *v, bool on) {
 	int sw, sh;
 	server_screen(s, &sw, &sh);
 	if (on) {
+		struct wlr_box ob = server_output_box(s, v->x + view_frame_w(v) / 2.0, v->y + 10);
+		sw = ob.width;
+		sh = ob.height;
 		v->pre_fullscreen = (struct wlr_box){v->x, v->y, v->cw, v->ch};
 		v->fullscreen = true;
-		v->x = v->y = 0;
+		v->x = ob.x;
+		v->y = ob.y;
 		wlr_scene_node_reparent(&v->tree->node, s->layer_fullscreen);
 		wlr_xdg_toplevel_set_size(v->xt, sw, sh);
 	} else {
@@ -669,13 +762,12 @@ void view_close(struct view *v) {
 enum { SNAP_NONE, SNAP_MAX, SNAP_LEFT, SNAP_RIGHT };
 
 static struct wlr_box snap_area(struct server *s, int zone) {
-	int sw, sh;
-	server_screen(s, &sw, &sh);
-	int h = sh - taskbar_h(s);
+	struct wlr_box wa = server_work_area(s, s->cursor->x, s->cursor->y);
+	int sw = wa.width, h = wa.height;
 	switch (zone) {
-	case SNAP_LEFT: return (struct wlr_box){0, 0, sw / 2, h};
-	case SNAP_RIGHT: return (struct wlr_box){sw - sw / 2, 0, sw / 2, h};
-	default: return (struct wlr_box){0, 0, sw, h};
+	case SNAP_LEFT: return (struct wlr_box){wa.x, wa.y, sw / 2, h};
+	case SNAP_RIGHT: return (struct wlr_box){wa.x + sw - sw / 2, wa.y, sw / 2, h};
+	default: return (struct wlr_box){wa.x, wa.y, sw, h};
 	}
 }
 
@@ -1527,7 +1619,9 @@ static void process_motion(struct server *s, uint32_t time) {
 		if (s->opt_snap) {
 			int sw, sh;
 			server_screen(s, &sw, &sh);
-			snap_preview(s, ly <= 1 ? SNAP_MAX : lx <= 1 ? SNAP_LEFT : lx >= sw - 2 ? SNAP_RIGHT : SNAP_NONE);
+			struct wlr_box ob = server_output_box(s, lx, ly);
+			snap_preview(s, ly <= ob.y + 1 ? SNAP_MAX : lx <= ob.x + 1 ? SNAP_LEFT :
+				lx >= ob.x + ob.width - 2 ? SNAP_RIGHT : SNAP_NONE);
 		}
 		return;
 	}
@@ -2100,7 +2194,12 @@ static void write_outputs_status(struct server *s) {
 			fprintf(f, "%s%dx%d@%d", first ? "" : ",", m->width, m->height, m->refresh);
 			first = false;
 		}
-		fputc('\n', f);
+		/* then: layout position, primary, rotation, physical size in mm */
+		struct wlr_box b = {0};
+		wlr_output_layout_get_box(s->output_layout, wo, &b);
+		struct output_conf *c = output_conf(s, wo->name);
+		fprintf(f, "\t%d,%d,%d,%d\t%d\t%d\t%dx%d\n", b.x, b.y, b.width, b.height, wo == primary_output(s), c ? c->rotation : 0,
+			wo->phys_width, wo->phys_height);
 	}
 	fclose(f);
 }
@@ -2120,6 +2219,7 @@ static void on_new_output(struct wl_listener *l, void *data) {
 		wlr_output_state_set_enabled(&st, false); /* never switch off the only screen */
 	double scale = pick_scale(s, wo, mode ? mode->width : wo->width);
 	wlr_output_state_set_scale(&st, scale);
+	wlr_output_state_set_transform(&st, rotation_transform(oc ? oc->rotation : 0));
 	ui_scale = scale;
 	wlr_log(WLR_INFO, "%s: scale %.0f%%", wo->name, scale * 100);
 	wlr_output_commit_state(wo, &st);
@@ -2137,9 +2237,10 @@ static void on_new_output(struct wl_listener *l, void *data) {
 	wl_list_insert(&s->outputs, &o->link);
 
 	struct wlr_output_layout_output *lo = wlr_output_layout_add_auto(s->output_layout, wo);
-	write_outputs_status(s);
 	struct wlr_scene_output *so = wlr_scene_output_create(s->scene, wo);
 	wlr_scene_output_layout_add_output(s->scene_layout, lo, so);
+	arrange_outputs(s);
+	write_outputs_status(s);
 	if (s->shell)
 		shell_layout(s->shell);
 	if (s->session)
@@ -2227,6 +2328,7 @@ static void load_config(struct server *s) {
 	s->opt_keyboard[0] = 0;
 	s->opt_screen_off = 10;
 	s->n_out_conf = 0;
+	s->display_mode = 0;
 	/* Windows version: XP unless only Windows 7 has been ripped */
 	s->style = s->have_xp ? 0 : 7;
 	s->st_frames = s->st_taskbar = s->st_start = s->st_logon = s->st_sounds = s->st_cursors = s->st_icons = -1;
@@ -2325,8 +2427,16 @@ static void load_config(struct server *s) {
 				c->refresh_mhz = (int)(hz * 1000 + 0.5);
 			} else if (!strcmp(dot, ".enabled")) {
 				c->disabled = !conf_true(val);
+			} else if (!strcmp(dot, ".position")) {
+				c->has_pos = sscanf(val, "%d,%d", &c->x, &c->y) == 2;
+			} else if (!strcmp(dot, ".primary")) {
+				c->primary = conf_true(val);
+			} else if (!strcmp(dot, ".rotation")) {
+				c->rotation = atoi(val);
 			}
 		}
+		else if (!strcmp(key, "display_mode"))
+			s->display_mode = !strcasecmp(val, "duplicate") ? 1 : 0;
 		else if (!strcmp(key, "keyboard_layout"))
 			snprintf(s->opt_keyboard, sizeof(s->opt_keyboard), "%s", val);
 	}
@@ -2436,7 +2546,9 @@ static int on_sighup(int sig, void *data) {
 		struct output_conf *oc = output_conf(s, wo->name);
 		bool enable = !(oc && oc->disabled) || wl_list_length(&s->outputs) == 1;
 		double scale = pick_scale(s, wo, mode ? mode->width : wo->width);
-		if (scale == wo->scale && (!mode || mode == wo->current_mode) && enable == wo->enabled)
+		enum wl_output_transform tf = rotation_transform(oc ? oc->rotation : 0);
+		if (scale == wo->scale && (!mode || mode == wo->current_mode) && enable == wo->enabled &&
+				tf == wo->transform)
 			continue;
 		struct wlr_output_state st;
 		wlr_output_state_init(&st);
@@ -2444,8 +2556,10 @@ static int on_sighup(int sig, void *data) {
 		if (mode)
 			wlr_output_state_set_mode(&st, mode);
 		wlr_output_state_set_scale(&st, scale);
+		wlr_output_state_set_transform(&st, tf);
 		wlr_output_commit_state(wo, &st);
 		wlr_output_state_finish(&st);
+		arrange_outputs(s);
 		write_outputs_status(s);
 		ui_scale = scale;
 		/* redraw everything at the new size */
@@ -2461,6 +2575,10 @@ static int on_sighup(int sig, void *data) {
 			}
 		}
 	}
+	/* a moved or new primary screen: re-place them all, and the taskbar with them */
+	arrange_outputs(s);
+	write_outputs_status(s);
+	shell_layout(s->shell);
 	shell_reconfigure(s->shell);
 	/* frames may have changed version or colour */
 	struct view *v;

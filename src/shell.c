@@ -64,6 +64,7 @@ struct shell {
 	struct server *server;
 	int w, h;
 	struct wlr_scene_buffer *desktop, *taskbar, *menu, *cascade;
+	struct wlr_scene_buffer *other_desk[4]; /* wallpaper on the other screens */
 	struct wlr_scene_buffer *bar_glass, *menu_glass;
 	char date[24];
 	int bat_pct; /* -1: no battery */
@@ -2036,8 +2037,44 @@ void shell_reconfigure(struct shell *sh) {
 	draw_menu(sh);
 }
 
+/* Windows shows the wallpaper (no icons) on every extended screen */
+static void draw_other_desktops(struct shell *sh) {
+	struct wlr_box boxes[4];
+	int n = server_other_outputs(sh->server, boxes, 4);
+	struct theme *t = desk_theme(sh);
+	for (int i = 0; i < 4; i++) {
+		if (i >= n) {
+			if (sh->other_desk[i])
+				wlr_scene_node_set_enabled(&sh->other_desk[i]->node, false);
+			continue;
+		}
+		struct wlr_box b = boxes[i];
+		cairo_surface_t *c = canvas_new(b.width, b.height);
+		cairo_t *cr = cairo_create(c);
+		cairo_set_source_rgb(cr, t->desktop_bg[0], t->desktop_bg[1], t->desktop_bg[2]);
+		cairo_paint(cr);
+		if (t->wallpaper) {
+			double ww = cairo_image_surface_get_width(t->wallpaper), wh = cairo_image_surface_get_height(t->wallpaper);
+			if (t->wallpaper_style == WALL_TILE) {
+				cairo_set_source_surface(cr, t->wallpaper, 0, 0);
+				cairo_pattern_set_extend(cairo_get_source(cr), CAIRO_EXTEND_REPEAT);
+			} else if (t->wallpaper_style == WALL_CENTER) {
+				cairo_set_source_surface(cr, t->wallpaper, (int)((b.width - ww) / 2), (int)((b.height - wh) / 2));
+			} else {
+				cairo_scale(cr, b.width / ww, b.height / wh);
+				cairo_set_source_surface(cr, t->wallpaper, 0, 0);
+				cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+			}
+			cairo_paint(cr);
+		}
+		cairo_destroy(cr);
+		show(&sh->other_desk[i], sh->server->layer_desktop, c, b.x, b.y);
+	}
+}
+
 void shell_layout(struct shell *sh) {
 	server_screen(sh->server, &sh->w, &sh->h);
+	draw_other_desktops(sh);
 	if (sh->bright_veil)
 		wlr_scene_rect_set_size(sh->bright_veil, sh->w, sh->h);
 	draw_desktop(sh);

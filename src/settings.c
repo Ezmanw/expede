@@ -36,8 +36,9 @@ struct config {
 	int scale_pct, speed, screen_off, glass_intensity;
 	char wallpaper[256], wall_style[16], picture[64], keyboard[64];
 	char style[16], glass_color[32], frames[16], taskbar[16], start_menu[16], logon[16], sound_scheme[16], pointers[16], icons[16];
-	struct { char name[32], mode[32]; bool disabled; } out[8];
+	struct { char name[32], mode[32]; bool disabled, has_pos, primary; int x, y, rotation; } out[8];
 	int n_out;
+	bool duplicate; /* Multiple displays: Duplicate rather than Extend */
 };
 static struct config cfg, saved;
 
@@ -113,6 +114,7 @@ static void config_load(void) {
 		else if (!strcmp(key, "taskbar")) snprintf(cfg.taskbar, sizeof(cfg.taskbar), "%s", val);
 		else if (!strcmp(key, "start_menu")) snprintf(cfg.start_menu, sizeof(cfg.start_menu), "%s", val);
 		else if (!strcmp(key, "logon")) snprintf(cfg.logon, sizeof(cfg.logon), "%s", val);
+		else if (!strcmp(key, "display_mode")) cfg.duplicate = !strcasecmp(val, "duplicate");
 		else if (!strcmp(key, "sound_scheme")) snprintf(cfg.sound_scheme, sizeof(cfg.sound_scheme), "%s", val);
 		else if (!strcmp(key, "pointers")) snprintf(cfg.pointers, sizeof(cfg.pointers), "%s", val);
 		else if (!strcmp(key, "icons")) snprintf(cfg.icons, sizeof(cfg.icons), "%s", val);
@@ -125,6 +127,12 @@ static void config_load(void) {
 				snprintf(cfg.out[i].mode, sizeof(cfg.out[i].mode), "%s", val);
 			else if (i >= 0 && !strcmp(dot, ".enabled"))
 				cfg.out[i].disabled = !truthy(val);
+			else if (i >= 0 && !strcmp(dot, ".position"))
+				cfg.out[i].has_pos = sscanf(val, "%d,%d", &cfg.out[i].x, &cfg.out[i].y) == 2;
+			else if (i >= 0 && !strcmp(dot, ".primary"))
+				cfg.out[i].primary = truthy(val);
+			else if (i >= 0 && !strcmp(dot, ".rotation"))
+				cfg.out[i].rotation = atoi(val);
 		}
 	}
 	if (f)
@@ -180,7 +188,15 @@ static void config_save(void) {
 			fprintf(f, "output.%s.mode = %s\n", cfg.out[i].name, cfg.out[i].mode);
 		if (cfg.out[i].disabled)
 			fprintf(f, "output.%s.enabled = false\n", cfg.out[i].name);
+		if (cfg.out[i].has_pos)
+			fprintf(f, "output.%s.position = %d,%d\n", cfg.out[i].name, cfg.out[i].x, cfg.out[i].y);
+		if (cfg.out[i].primary)
+			fprintf(f, "output.%s.primary = true\n", cfg.out[i].name);
+		if (cfg.out[i].rotation)
+			fprintf(f, "output.%s.rotation = %d\n", cfg.out[i].name, cfg.out[i].rotation);
 	}
+	if (cfg.duplicate)
+		fprintf(f, "display_mode = duplicate\n");
 	fclose(f);
 	saved = cfg;
 	ui_reload_theme();
@@ -408,7 +424,12 @@ static void power_refresh(void) {
 
 /* ---- displays, from the compositor's ~/.cache/expede/outputs ---- */
 
-struct screen { char name[32], desc[96], cur[32], modes[64][24]; int n_modes; bool enabled; };
+struct screen {
+	char name[32], desc[96], cur[32], modes[64][24];
+	int n_modes;
+	bool enabled, primary;
+	int x, y, w, h, rotation, mm_w, mm_h; /* layout box (logical pixels), physical size */
+};
 static struct screen screens[8];
 static int n_screens, screen_sel;
 
@@ -424,14 +445,23 @@ static void screens_refresh(void) {
 	char line[8192];
 	while (f && n_screens < 8 && fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\n")] = 0;
-		char *fld[7];
+		char *fld[11];
 		int n = 0;
 		fld[n++] = line;
-		for (char *p = line; *p && n < 7; p++)
+		for (char *p = line; *p && n < 11; p++)
 			if (*p == '\t') { *p = 0; fld[n++] = p + 1; }
 		if (n < 7)
 			continue;
 		struct screen *s = &screens[n_screens++];
+		memset(s, 0, sizeof(*s));
+		if (n >= 11) {
+			sscanf(fld[7], "%d,%d,%d,%d", &s->x, &s->y, &s->w, &s->h);
+			s->primary = atoi(fld[8]);
+			s->rotation = atoi(fld[9]);
+			sscanf(fld[10], "%dx%d", &s->mm_w, &s->mm_h);
+		}
+		if (s->w <= 0)
+			sscanf(fld[2], "%dx%d", &s->w, &s->h);
 		snprintf(s->name, sizeof(s->name), "%s", fld[0]);
 		snprintf(s->desc, sizeof(s->desc), "%s", fld[1]);
 		snprintf(s->cur, sizeof(s->cur), "%s@%d", fld[2], (atoi(fld[3]) + 500) / 1000);
@@ -788,21 +818,24 @@ enum {
 	ID_SNAP, ID_TAP, ID_NATURAL, ID_SPEED, ID_VOLUME, ID_MUTE, ID_MIC, ID_SCHEME_DEFAULT, ID_SCHEME_NONE,
 	ID_TEST_SOUND, ID_CLOCK12, ID_CLOCK24, ID_STRETCH, ID_CENTER, ID_TILE, ID_WIFI_ON, ID_WIFI_REFRESH,
 	ID_WIFI_CONNECT, ID_WIFI_DISCONNECT, ID_WIFI_PW, ID_BT_POWER, ID_BT_SCAN, ID_BT_CONNECT, ID_BT_DISCONNECT,
-	ID_BT_REMOVE, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_REMOVE_PROG,
+	ID_BT_REMOVE, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_PRIMARY, ID_DUPLICATE, ID_ROT0, ID_ROT90, ID_ROT180, ID_ROT270, ID_REMOVE_PROG,
 	ID_CHANGE_PROGS, ID_ADD_PROGS, ID_SEARCH_PKGS, ID_INSTALL_PKG, ID_PKG_TERM, ID_PKG_QUERY,
 	ID_SET_ZONE, ID_XP_STYLE, ID_W7_STYLE, ID_GLASS_ON, ID_GLASS_INTENSITY,
 	ID_START_XP, ID_START_SEARCH, ID_START_W7, ID_OPEN_PERSONALIZE,
-	ID_TAB = 50,          /* + tab */
-	ID_SCALE = 60,        /* + 0..5 */
-	ID_SCREEN_OFF = 70,   /* + choice */
-	ID_SCREEN = 80,       /* + screen */
-	ID_CATEGORY = 100,    /* + category */
-	ID_APPLET = 200,      /* + kind */
-	ID_SWATCH = 300,      /* + 0..14 */
-	ID_PART_OVR = 400,    /* + part * 3 + (0=auto, 1=xp, 2=7) */
+	ID_SINGLE_END,        /* the ranges below must start above this */
+	ID_TAB = 500,         /* + tab */
+	ID_SCALE = 510,       /* + 0..5 */
+	ID_SCREEN_OFF = 520,  /* + choice */
+	ID_SCREEN = 540,      /* + screen */
+	ID_CATEGORY = 600,    /* + category */
+	ID_APPLET = 700,      /* + kind */
+	ID_SWATCH = 800,      /* + 0..14 */
+	ID_PART_OVR = 900,    /* + part * 3 + (0=auto, 1=xp, 2=7) */
 	ID_LIST = 1000,       /* + row */
 	ID_LIST2 = 5000,      /* + row, a second list */
 };
+
+_Static_assert(ID_SINGLE_END < ID_TAB, "too many single IDs: move the ranges up");
 
 struct sheet {
 	enum kind kind;
@@ -1020,6 +1053,70 @@ static void paint_monitor(cairo_t *cr, int x, int y) {
 
 static const char *mode_label(int i) { return screens[screen_sel].modes[i]; }
 
+/* fit every screen's layout box into the diagram area */
+static void layout_scale(struct ui_rect area, int *x0, int *y0, double *k) {
+	int minx = 0, miny = 0, maxx = 1, maxy = 1;
+	for (int i = 0; i < n_screens; i++) {
+		struct screen *sc = &screens[i];
+		if (!i || sc->x < minx) minx = sc->x;
+		if (!i || sc->y < miny) miny = sc->y;
+		if (!i || sc->x + sc->w > maxx) maxx = sc->x + sc->w;
+		if (!i || sc->y + sc->h > maxy) maxy = sc->y + sc->h;
+	}
+	double kx = (area.w - 20.0) / (maxx - minx), ky = (area.h - 16.0) / (maxy - miny);
+	*k = kx < ky ? kx : ky;
+	/* centre the arrangement */
+	*x0 = minx - (int)((area.w / *k - (maxx - minx)) / 2);
+	*y0 = miny - (int)((area.h / *k - (maxy - miny)) / 2);
+}
+
+/* dragging a monitor: Windows snaps it so its edge touches a neighbour's */
+static int drag_screen = -1;
+static double drag_ox, drag_oy;
+
+static void snap_screen(int i) {
+	struct screen *a = &screens[i];
+	int best = -1, bx = a->x, by = a->y;
+	long bd = 0;
+	for (int j = 0; j < n_screens; j++) {
+		if (j == i)
+			continue;
+		struct screen *b = &screens[j];
+		int cy = a->y < b->y - a->h + 1 ? b->y - a->h + 1 : a->y > b->y + b->h - 1 ? b->y + b->h - 1 : a->y;
+		int cx = a->x < b->x - a->w + 1 ? b->x - a->w + 1 : a->x > b->x + b->w - 1 ? b->x + b->w - 1 : a->x;
+		int cand[4][2] = {{b->x - a->w, cy}, {b->x + b->w, cy}, {cx, b->y - a->h}, {cx, b->y + b->h}};
+		for (int c = 0; c < 4; c++) {
+			long d = (long)(cand[c][0] - a->x) * (cand[c][0] - a->x) + (long)(cand[c][1] - a->y) * (cand[c][1] - a->y);
+			if (best < 0 || d < bd) {
+				best = j;
+				bd = d;
+				bx = cand[c][0];
+				by = cand[c][1];
+			}
+		}
+	}
+	a->x = bx;
+	a->y = by;
+}
+
+/* store the arrangement relative to the primary screen, which Expede puts at 0,0 */
+static void store_positions(void) {
+	int p = 0;
+	for (int i = 0; i < n_screens; i++) {
+		int c = out_index(screens[i].name, false);
+		if ((c >= 0 && cfg.out[c].primary) || (screens[i].primary && !(c >= 0 && cfg.out[c].has_pos)))
+			p = i;
+	}
+	for (int i = 0; i < n_screens; i++) {
+		int c = out_index(screens[i].name, true);
+		if (c < 0)
+			continue;
+		cfg.out[c].has_pos = i != p;
+		cfg.out[c].x = screens[i].x - screens[p].x;
+		cfg.out[c].y = screens[i].y - screens[p].y;
+	}
+}
+
 static void paint_display(struct sheet *s, cairo_t *cr) {
 	struct ui_win *w = s->win;
 	if (s->tab == 0) {
@@ -1048,33 +1145,53 @@ static void paint_display(struct sheet *s, cairo_t *cr) {
 			hint(cr, 24, 50, "No screen information yet: this tab needs Expede running.");
 			return;
 		}
-		/* the screens as numbered monitors, like XP's Settings tab */
-		int mx = 30, my = 44;
+		/* XP's Settings tab: the screens as numbered monitors where they sit; drag to arrange */
+		struct ui_rect area = {.x = 18, .y = 34, .w = SHEET_W - 36, .h = 92};
+		ui_fill(cr, area.x, area.y, area.w, area.h, 0x7f9db9);
+		ui_fill(cr, area.x + 1, area.y + 1, area.w - 2, area.h - 2, 0xffffff);
+		int x0, y0;
+		double k;
+		layout_scale(area, &x0, &y0, &k);
 		for (int i = 0; i < n_screens; i++) {
-			ui_fill(cr, mx, my, 70, 52, i == screen_sel ? 0x316ac5 : 0x6a6a6a);
-			ui_fill(cr, mx + 3, my + 3, 64, 46, screens[i].enabled ? 0x3a6ea5 : 0x9a9a9a);
+			struct screen *sc = &screens[i];
+			int dx = area.x + (int)((sc->x - x0) * k), dy = area.y + (int)((sc->y - y0) * k);
+			int dw = (int)(sc->w * k), dh = (int)(sc->h * k);
+			ui_fill(cr, dx, dy, dw, dh, i == screen_sel ? 0x000000 : 0x404040);
+			ui_fill(cr, dx + 2, dy + 2, dw - 4, dh - 4, sc->enabled ? 0x3a6ea5 : 0x9a9a9a);
 			char num[8];
 			snprintf(num, sizeof(num), "%d", i + 1);
-			ui_text(cr, "Trebuchet MS, Bold 16", num, mx + 28, my + 12, 0, 0xffffff);
-			ui_reg(w, ID_SCREEN + i, mx, my, 70, 52);
-			mx += 80;
+			int tw = text_width("Trebuchet MS, Bold 16", num);
+			ui_text(cr, "Trebuchet MS, Bold 16", num, dx + (dw - tw) / 2, dy + dh / 2 - 13, 0, 0xffffff);
+			ui_reg(w, ID_SCREEN + i, dx, dy, dw, dh);
 		}
 		struct screen *sc = &screens[screen_sel];
-		char d[160];
-		snprintf(d, sizeof(d), "Display:  %d. %s (%s)", screen_sel + 1, sc->desc, sc->name);
-		ui_text(cr, "Tahoma 8", d, 18, 110, SHEET_W - 36, 0x000000);
-		ui_group(cr, 16, 130, SHEET_W - 32, 230, "Screen resolution and refresh rate");
+		char d[200];
+		snprintf(d, sizeof(d), "Display:  %d. %s (%s)%s", screen_sel + 1, sc->desc, sc->name,
+			sc->mm_w ? "" : "");
+		ui_text(cr, "Tahoma 8", d, 18, 132, SHEET_W - 36, 0x000000);
+		ui_group(cr, 16, 150, SHEET_W - 32, 118, "Screen resolution and refresh rate");
 		int ci = out_index(sc->name, false);
 		const char *want = ci >= 0 && cfg.out[ci].mode[0] ? cfg.out[ci].mode : sc->cur;
 		int sel = -1;
 		for (int i = 0; i < sc->n_modes; i++)
 			if (!strcmp(sc->modes[i], want))
 				sel = i;
-		listbox(w, cr, ID_LIST, 28, 152, SHEET_W - 56, 160, sc->n_modes, sel, &s->scroll, &s->list_box, mode_label, NULL, 17);
-		if (n_screens > 1)
-			ui_check(w, cr, ID_SCREEN_ENABLED, 28, 324, !(ci >= 0 && cfg.out[ci].disabled), false, "Use this device");
-		else
-			hint(cr, 28, 324, "Your only screen is always on.");
+		listbox(w, cr, ID_LIST, 28, 170, SHEET_W - 56, 88, sc->n_modes, sel, &s->scroll, &s->list_box, mode_label, NULL, 17);
+		ui_text(cr, "Tahoma 8", "Orientation:", 18, 278, 0, 0x000000);
+		int rot = ci >= 0 ? cfg.out[ci].rotation : 0;
+		static const char *rl[4] = {"Landscape", "Portrait", "Landscape (flipped)", "Portrait (flipped)"};
+		for (int i = 0; i < 4; i++)
+			ui_check(w, cr, ID_ROT0 + i, 90 + (i % 2) * 150, 278 + (i / 2) * 20, rot == i * 90, true, rl[i]);
+		if (n_screens > 1) {
+			bool pri = ci >= 0 && cfg.out[ci].primary ? true : sc->primary;
+			ui_check(w, cr, ID_PRIMARY, 18, 326, pri, false, "Use this device as the primary monitor.");
+			ui_check(w, cr, ID_SCREEN_ENABLED, 18, 348, !(ci >= 0 && cfg.out[ci].disabled), false,
+				"Extend my Windows desktop onto this monitor.");
+			ui_check(w, cr, ID_DUPLICATE, 18, 370, cfg.duplicate, false, "Duplicate my desktop on every monitor.");
+			hint(cr, 18, 396, "Drag the monitor icons to match how your screens are arranged.");
+		} else {
+			hint(cr, 18, 326, "Plug in another screen to extend or duplicate your desktop.");
+		}
 	}
 }
 
@@ -1898,12 +2015,27 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 			s->dragging = true;
 			w->motion(w, x, y, true);
 		}
+		if (id >= ID_SCREEN && id < ID_SCREEN + n_screens && n_screens > 1) {
+			screen_sel = id - ID_SCREEN;
+			drag_screen = screen_sel;
+			drag_ox = x;
+			drag_oy = y;
+			s->dragging = true;
+			s->scroll = 0;
+			redraw_all();
+		}
 		if (id >= ID_LIST && clicks == 2) /* double clicks act on press */
 			list_pick(s, id >= ID_LIST2 ? id - ID_LIST2 : id - ID_LIST, id >= ID_LIST2, 2);
 		return;
 	}
 	if (s->dragging) {
 		s->dragging = false;
+		if (drag_screen >= 0) {
+			snap_screen(drag_screen);
+			store_positions();
+			drag_screen = -1;
+			redraw_all();
+		}
 		return;
 	}
 	if (id != w->pressed || !id)
@@ -1962,6 +2094,22 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 	case ID_CENTER: snprintf(cfg.wall_style, sizeof(cfg.wall_style), "center"); break;
 	case ID_TILE: snprintf(cfg.wall_style, sizeof(cfg.wall_style), "tile"); break;
 	case ID_MUTE: muted = !muted; volume_mute(muted); break;
+	case ID_PRIMARY: {
+		for (int i = 0; i < n_screens; i++) {
+			int c = out_index(screens[i].name, true);
+			if (c >= 0)
+				cfg.out[c].primary = i == screen_sel;
+		}
+		store_positions();
+		break;
+	}
+	case ID_DUPLICATE: cfg.duplicate = !cfg.duplicate; break;
+	case ID_ROT0: case ID_ROT90: case ID_ROT180: case ID_ROT270: {
+		int c = out_index(screens[screen_sel].name, true);
+		if (c >= 0)
+			cfg.out[c].rotation = (id - ID_ROT0) * 90;
+		break;
+	}
 	case ID_SCREEN_ENABLED: {
 		int c = out_index(screens[screen_sel].name, true);
 		if (c >= 0)
@@ -2097,6 +2245,17 @@ static void sheet_motion(struct ui_win *w, double x, double y, bool held) {
 		cfg.speed = slider_value(w, ID_SPEED, x) * 2 - 100;
 	} else if (w->pressed == ID_GLASS_INTENSITY) {
 		cfg.glass_intensity = slider_value(w, ID_GLASS_INTENSITY, x);
+	} else if (drag_screen >= 0) {
+		int x0, y0;
+		double k;
+		layout_scale((struct ui_rect){.x = 18, .y = 34, .w = SHEET_W - 36, .h = 92}, &x0, &y0, &k);
+		int dx = (int)((x - drag_ox) / k), dy = (int)((y - drag_oy) / k);
+		if (dx || dy) {
+			screens[drag_screen].x += dx;
+			screens[drag_screen].y += dy;
+			drag_ox += dx * k;
+			drag_oy += dy * k;
+		}
 	}
 	redraw_all();
 }

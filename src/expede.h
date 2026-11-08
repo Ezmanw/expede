@@ -102,7 +102,9 @@ struct server {
 	bool opt_sounds, opt_clock24;
 	char opt_wallpaper[256], opt_wallpaper_style[16], opt_user_picture[64], opt_keyboard[64];
 	int opt_screen_off; /* minutes idle before the screens turn off; 0 = never */
-	struct output_conf { char name[32]; int w, h, refresh_mhz; bool disabled; } out_conf[8];
+	struct output_conf { char name[32]; int w, h, refresh_mhz; bool disabled, has_pos, primary; int x, y, rotation; } out_conf[8];
+	/* Windows' "Multiple displays": 0 extend, 1 duplicate */
+	int display_mode;
 	int n_out_conf;
 	/* idle */
 	struct wl_event_source *idle_timer;
@@ -146,7 +148,12 @@ void view_focus(struct view *v);
 void view_set_minimized(struct view *v, bool min);
 void view_close(struct view *v);
 void spawn(const char *cmd);
-void server_screen(struct server *s, int *w, int *h);
+void server_screen(struct server *s, int *w, int *h); /* the primary screen's size */
+/* the screen under (x, y) (the primary one if none), whole or minus the taskbar */
+struct wlr_box server_output_box(struct server *s, double x, double y);
+struct wlr_box server_work_area(struct server *s, double x, double y);
+/* boxes of the other enabled screens (not the primary, not mirrors of it) */
+int server_other_outputs(struct server *s, struct wlr_box *boxes, int max);
 
 #include "volume.h"
 
