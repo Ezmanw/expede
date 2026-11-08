@@ -62,6 +62,12 @@ struct ui_menu_item { const char *label; bool bold, disabled; };
 void ui_menu(struct ui_win *w, cairo_t *cr, int base_id, int x, int y, const struct ui_menu_item *items, int n);
 int ui_menu_height(const struct ui_menu_item *items, int n);
 
+/* call cb when fd is readable (or hung up), from ui_run's loop; ui_unwatch stops it */
+void ui_watch(int fd, void (*cb)(int fd, void *data), void *data);
+void ui_unwatch(int fd);
+/* call cb once, ms from now (one timer per cb; setting it again moves it) */
+void ui_after(int ms, void (*cb)(void *data), void *data);
+
 /* run a shell command in the background */
 void spawn(const char *cmd);
 /* single-quote s for /bin/sh into out */

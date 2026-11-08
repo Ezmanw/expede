@@ -304,7 +304,7 @@ static void net_refresh(bool rescan) {
 
 /* ---- bluetooth (bluez) ---- */
 
-struct bt { char mac[24], name[64]; bool paired, connected; };
+struct bt { char mac[24], name[64], kind[24]; bool paired, connected; int battery; };
 static struct bt bts[32];
 static int n_bt, bt_sel = -1;
 static bool bt_powered, have_bt;
@@ -334,8 +334,276 @@ static void bt_refresh(void) {
 		char *info = capture(cmd);
 		bts[i].paired = strstr(info, "Paired: yes") != NULL;
 		bts[i].connected = strstr(info, "Connected: yes") != NULL;
+		/* what it is, from BlueZ's icon name, and its battery if it reports one */
+		static const struct { const char *icon, *label; } kinds[] = {
+			{"audio-headset", "Headset"}, {"audio-headphones", "Headphones"}, {"audio-card", "Speaker"},
+			{"input-keyboard", "Keyboard"}, {"input-mouse", "Mouse"}, {"input-gaming", "Game controller"},
+			{"input-tablet", "Pen"}, {"phone", "Phone"}, {"computer", "Computer"}, {"printer", "Printer"},
+			{"camera", "Camera"}, {"video-display", "Display"},
+		};
+		bts[i].kind[0] = 0;
+		char *ic = strstr(info, "Icon: ");
+		for (size_t k = 0; ic && k < sizeof(kinds) / sizeof(*kinds); k++)
+			if (!strncmp(ic + 6, kinds[k].icon, strlen(kinds[k].icon)))
+				snprintf(bts[i].kind, sizeof(bts[i].kind), "%s", kinds[k].label);
+		char *bp = strstr(info, "Battery Percentage:");
+		bts[i].battery = -1;
+		if (bp && (bp = strchr(bp, '(')))
+			bts[i].battery = atoi(bp + 1);
 		free(info);
 	}
+}
+
+/* One bluetoothctl kept open for the life of the dialog: it is BlueZ's pairing
+ * agent (so passkeys and PINs come to us) and streams devices as a scan finds them. */
+static int btc_in = -1, btc_out = -1;
+static char btc_buf[4096];
+static int btc_len;
+static int bt_prompt;        /* 0 none, 1 confirm a passkey, 2 type a PIN */
+static char bt_prompt_text[160], bt_pin[17], bt_status[160], bt_pairing[24];
+static int bt_pin_caret;
+static bool bt_scanning;
+static void redraw_all(void);
+
+static void btc_send(const char *fmt, const char *arg) {
+	if (btc_in < 0)
+		return;
+	char line[160];
+	int n = snprintf(line, sizeof(line), fmt, arg);
+	if (write(btc_in, line, n) < 0 || write(btc_in, "\n", 1) < 0)
+		return;
+}
+
+static const char *bt_name(const char *mac) {
+	for (int i = 0; i < n_bt; i++)
+		if (!strcmp(bts[i].mac, mac))
+			return bts[i].name;
+	return mac;
+}
+
+static void btc_line(char *line) {
+	/* drop colour codes and the "[bluetooth]# " prompt bluetoothctl repaints */
+	char clean[512];
+	size_t o = 0;
+	for (char *p = line; *p && o < sizeof(clean) - 1; p++) {
+		if (*p == 0x1b) {
+			while (*p && !(*p >= 'A' && *p <= 'Z') && !(*p >= 'a' && *p <= 'z' && *p != '['))
+				p++;
+			if (!*p)
+				break;
+			continue;
+		}
+		if (*p != '\r' && *p != 1 && *p != 2)
+			clean[o++] = *p;
+	}
+	clean[o] = 0;
+	char *l = clean, *hash;
+	while ((hash = strstr(l, "]# ")) && hash - l < 40)
+		l = hash + 3;
+	char mac[24], name[64];
+	unsigned pk;
+	if (strstr(l, "Confirm passkey") && sscanf(strstr(l, "Confirm passkey"), "Confirm passkey %u", &pk) == 1) {
+		bt_prompt = 1;
+		snprintf(bt_prompt_text, sizeof(bt_prompt_text), "%06u", pk);
+	} else if (strstr(l, "Enter PIN code") || strstr(l, "Enter passkey")) {
+		bt_prompt = 2;
+		bt_pin[0] = 0;
+		bt_pin_caret = 0;
+	} else if (strstr(l, "Passkey: ") && !bt_prompt) {
+		/* a keyboard: type this on it */
+		snprintf(bt_status, sizeof(bt_status), "Type %s on the keyboard, then press Enter.", strstr(l, "Passkey: ") + 9);
+	} else if (sscanf(l, "[NEW] Device %23s %63[^\n]", mac, name) == 2 && n_bt < 32) {
+		bool have_it = false;
+		for (int i = 0; i < n_bt; i++)
+			have_it |= !strcmp(bts[i].mac, mac);
+		/* skip the nameless ones (named after their own address), like Windows' wizard */
+		if (!have_it && strncmp(name, mac, 8) && strchr(name, '-') != name + 2) {
+			struct bt *b = &bts[n_bt++];
+			memset(b, 0, sizeof(*b));
+			snprintf(b->mac, sizeof(b->mac), "%s", mac);
+			snprintf(b->name, sizeof(b->name), "%s", name);
+			b->battery = -1;
+		}
+	} else if (strstr(l, "Pairing successful")) {
+		bt_prompt = 0;
+		snprintf(bt_status, sizeof(bt_status), "Paired with %s. Connecting...", bt_name(bt_pairing));
+		btc_send("trust %s", bt_pairing);
+		btc_send("connect %s", bt_pairing);
+	} else if (strstr(l, "Failed to pair")) {
+		bt_prompt = 0;
+		snprintf(bt_status, sizeof(bt_status), "Couldn't pair with %s. Make sure it's in pairing mode and try again.",
+			bt_name(bt_pairing));
+	} else if (strstr(l, "Connection successful")) {
+		snprintf(bt_status, sizeof(bt_status), "%s is connected and ready to use.", bt_name(bt_pairing));
+		bt_refresh();
+	} else if (strstr(l, "Failed to connect")) {
+		snprintf(bt_status, sizeof(bt_status), "Couldn't connect to %s. Is it on and nearby?", bt_name(bt_pairing));
+	} else if (strstr(l, "Discovery started")) {
+		bt_scanning = true;
+	} else if (strstr(l, "Discovery stopped")) {
+		bt_scanning = false;
+	} else {
+		return;
+	}
+	redraw_all();
+}
+
+static void btc_read(int fd, void *data) {
+	(void)data;
+	ssize_t n = read(fd, btc_buf + btc_len, sizeof(btc_buf) - 1 - btc_len);
+	if (n <= 0) {
+		ui_unwatch(fd);
+		close(fd);
+		close(btc_in);
+		btc_out = btc_in = -1;
+		return;
+	}
+	btc_len += n;
+	btc_buf[btc_len] = 0;
+	char *start = btc_buf, *nl;
+	while ((nl = strchr(start, '\n'))) {
+		*nl = 0;
+		btc_line(start);
+		start = nl + 1;
+	}
+	/* agent questions end in "(yes/no):" with no newline */
+	if (strstr(start, "(yes/no)") || strstr(start, "PIN code:") || strstr(start, "Enter passkey")) {
+		btc_line(start);
+		start += strlen(start);
+	}
+	btc_len = strlen(start);
+	memmove(btc_buf, start, btc_len + 1);
+	if (btc_len > (int)sizeof(btc_buf) - 512)
+		btc_len = 0; /* a runaway line: drop it */
+}
+
+static void btc_start(void) {
+	if (btc_in >= 0 || !have("bluetoothctl"))
+		return;
+	int to[2], from[2];
+	if (pipe(to) < 0)
+		return;
+	if (pipe(from) < 0) {
+		close(to[0]);
+		close(to[1]);
+		return;
+	}
+	pid_t pid = fork();
+	if (pid == 0) {
+		dup2(to[0], 0);
+		dup2(from[1], 1);
+		dup2(from[1], 2);
+		close(to[1]);
+		close(from[0]);
+		execlp("bluetoothctl", "bluetoothctl", (char *)NULL);
+		_exit(127);
+	}
+	close(to[0]);
+	close(from[1]);
+	if (pid < 0) {
+		close(to[1]);
+		close(from[0]);
+		return;
+	}
+	btc_in = to[1];
+	btc_out = from[0];
+	ui_watch(btc_out, btc_read, NULL);
+	btc_send("agent %s", "KeyboardDisplay");
+	btc_send("%s", "default-agent");
+}
+
+static void bt_scan_stop(void *data) {
+	(void)data;
+	btc_send("%s", "scan off");
+	bt_scanning = false;
+	redraw_all();
+}
+
+/* ---- printers (CUPS) ---- */
+
+struct printer { char name[64], info[96], state[64]; bool def, paused; int jobs; };
+static struct printer prns[16];
+static int n_prn, prn_sel = -1;
+struct job { char id[64], user[32], size[16], when[48]; };
+static struct job jobs[32];
+static int n_jobs, job_sel = -1;
+static bool have_cups;
+static char prn_message[200];
+
+static void jobs_refresh(void) {
+	n_jobs = 0;
+	if (prn_sel < 0 || prn_sel >= n_prn)
+		return;
+	char q[160], cmd[256];
+	snprintf(cmd, sizeof(cmd), "LC_ALL=C lpstat -o %s 2>/dev/null", ui_shell_quote(prns[prn_sel].name, q, sizeof(q)));
+	char *out = capture(cmd), *save;
+	for (char *l = strtok_r(out, "\n", &save); l && n_jobs < 32; l = strtok_r(NULL, "\n", &save)) {
+		struct job *j = &jobs[n_jobs];
+		/* "HP-7  ethan  12288  Sat 08 Nov 2026 11:40:01" */
+		if (sscanf(l, "%63s %31s %15s %47[^\n]", j->id, j->user, j->size, j->when) >= 3)
+			n_jobs++;
+	}
+	free(out);
+}
+
+static void prn_refresh(void) {
+	have_cups = have("lpstat");
+	n_prn = 0;
+	if (!have_cups)
+		return;
+	char *def = capture("LC_ALL=C lpstat -d 2>/dev/null"), *dn = strstr(def, ": ");
+	char defname[64] = "";
+	if (dn)
+		sscanf(dn + 2, "%63s", defname);
+	free(def);
+	char *out = capture("LC_ALL=C lpstat -p 2>/dev/null"), *save;
+	for (char *l = strtok_r(out, "\n", &save); l && n_prn < 16; l = strtok_r(NULL, "\n", &save)) {
+		char name[64];
+		if (strncmp(l, "printer ", 8) || sscanf(l + 8, "%63s", name) != 1)
+			continue;
+		struct printer *p = &prns[n_prn++];
+		memset(p, 0, sizeof(*p));
+		snprintf(p->name, sizeof(p->name), "%s", name);
+		p->def = !strcmp(name, defname);
+		p->paused = strstr(l, "disabled") != NULL;
+		snprintf(p->state, sizeof(p->state), "%s", p->paused ? "Paused" : strstr(l, "now printing") ? "Printing" : "Ready");
+	}
+	free(out);
+	/* each queue's length, and the description CUPS keeps */
+	for (int i = 0; i < n_prn; i++) {
+		char q[160], cmd[256];
+		snprintf(cmd, sizeof(cmd), "LC_ALL=C lpstat -o %s 2>/dev/null | wc -l", ui_shell_quote(prns[i].name, q, sizeof(q)));
+		char *c = capture(cmd);
+		prns[i].jobs = atoi(c);
+		free(c);
+		snprintf(cmd, sizeof(cmd), "LC_ALL=C lpstat -l -p %s 2>/dev/null | sed -n 's/^\\tDescription: //p'", q);
+		c = capture(cmd);
+		c[strcspn(c, "\n")] = 0;
+		snprintf(prns[i].info, sizeof(prns[i].info), "%s", c);
+		free(c);
+	}
+	if (prn_sel >= n_prn)
+		prn_sel = -1;
+	jobs_refresh();
+}
+
+/* run a CUPS admin command; deleting needs the admin password, which polkit asks for */
+static void prn_cmd(const char *fmt, bool admin) {
+	if (prn_sel < 0 || prn_sel >= n_prn)
+		return;
+	char q[160], cmd[400];
+	ui_shell_quote(prns[prn_sel].name, q, sizeof(q));
+	char body[300];
+	snprintf(body, sizeof(body), fmt, q);
+	snprintf(cmd, sizeof(cmd), "%s%s >/dev/null 2>&1", admin ? "pkexec " : "", body);
+	int rc = system(cmd);
+	if (rc != 0 && !admin) {
+		/* the user isn't a printer admin: ask once for the password instead */
+		snprintf(cmd, sizeof(cmd), "pkexec %s >/dev/null 2>&1", body);
+		rc = system(cmd);
+	}
+	snprintf(prn_message, sizeof(prn_message), "%s", rc == 0 ? "" : "That didn't work: you may need to be an administrator.");
+	prn_refresh();
 }
 
 /* ---- sound devices (wpctl) ---- */
@@ -775,7 +1043,7 @@ static void list_dir(const char *dir, struct choice **out, int *n, bool wallpape
 
 enum kind {
 	K_CP, K_DISPLAY, K_PERSONALIZE, K_TASKBAR, K_NETWORK, K_PROGRAMS, K_DEFAULTS, K_SOUNDS, K_SYSTEM, K_POWER,
-	K_MOUSE, K_BLUETOOTH, K_USERS, K_DATETIME, K_COUNT
+	K_MOUSE, K_BLUETOOTH, K_PRINTERS, K_USERS, K_DATETIME, K_COUNT
 };
 
 static const struct applet {
@@ -794,6 +1062,7 @@ static const struct applet {
 	[K_MOUSE] = {"mouse", "Mouse", "Mouse Properties", "cp-hardware", {"Pointer Options", "Touchpad", NULL}},
 	[K_BLUETOOTH] = {"bluetooth", "Bluetooth Devices", "Bluetooth Devices", "network", {"Devices", NULL}},
 	[K_USERS] = {"users", "User Accounts", "User Accounts", "cp-users", {"Picture", NULL}},
+	[K_PRINTERS] = {"printers", "Printers and Faxes", "Printers and Faxes", "cp-printer", {"Printers", NULL}},
 	[K_DATETIME] = {"datetime", "Date, Time and Keyboard", "Date and Time Properties", "cp-datetime", {"Date & Time", "Time Zone", "Keyboard", NULL}},
 };
 
@@ -804,7 +1073,7 @@ static const struct category { const char *name, *icon, *blurb; enum kind items[
 	{"Add or Remove Programs", "cp-programs", "Remove programs, or choose which program opens what.", {K_PROGRAMS, K_DEFAULTS}},
 	{"Sounds, Speech, and Audio\nDevices", "cp-sounds", "Change the volume, sound scheme or speakers.", {K_SOUNDS}},
 	{"Performance and\nMaintenance", "cp-performance", "See information about your computer, and power settings.", {K_SYSTEM, K_POWER}},
-	{"Printers and Other\nHardware", "cp-hardware", "Change mouse and touchpad settings, or add Bluetooth devices.", {K_MOUSE, K_BLUETOOTH}},
+	{"Printers and Other\nHardware", "cp-hardware", "Add a printer, change mouse and touchpad settings, or add Bluetooth devices.", {K_PRINTERS, K_MOUSE, K_BLUETOOTH}},
 	{"User Accounts", "cp-users", "Change your account picture.", {K_USERS}},
 	{"Date, Time, Language, and\nRegional Options", "cp-datetime", "Change the clock, time zone or keyboard layout.", {K_DATETIME}},
 };
@@ -818,7 +1087,7 @@ enum {
 	ID_SNAP, ID_TAP, ID_NATURAL, ID_SPEED, ID_VOLUME, ID_MUTE, ID_MIC, ID_SCHEME_DEFAULT, ID_SCHEME_NONE,
 	ID_TEST_SOUND, ID_CLOCK12, ID_CLOCK24, ID_STRETCH, ID_CENTER, ID_TILE, ID_WIFI_ON, ID_WIFI_REFRESH,
 	ID_WIFI_CONNECT, ID_WIFI_DISCONNECT, ID_WIFI_PW, ID_BT_POWER, ID_BT_SCAN, ID_BT_CONNECT, ID_BT_DISCONNECT,
-	ID_BT_REMOVE, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_PRIMARY, ID_DUPLICATE, ID_ROT0, ID_ROT90, ID_ROT180, ID_ROT270, ID_REMOVE_PROG,
+	ID_BT_REMOVE, ID_BT_YES, ID_BT_NO, ID_BT_PIN, ID_PRN_ADD, ID_PRN_DEFAULT, ID_PRN_TEST, ID_PRN_PAUSE, ID_PRN_DELETE, ID_PRN_PREFS, ID_JOB_CANCEL, ID_JOB_CANCEL_ALL, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_PRIMARY, ID_DUPLICATE, ID_ROT0, ID_ROT90, ID_ROT180, ID_ROT270, ID_REMOVE_PROG,
 	ID_CHANGE_PROGS, ID_ADD_PROGS, ID_SEARCH_PKGS, ID_INSTALL_PKG, ID_PKG_TERM, ID_PKG_QUERY,
 	ID_SET_ZONE, ID_XP_STYLE, ID_W7_STYLE, ID_GLASS_ON, ID_GLASS_INTENSITY,
 	ID_START_XP, ID_START_SEARCH, ID_START_W7, ID_OPEN_PERSONALIZE,
@@ -961,7 +1230,7 @@ static void listbox(struct ui_win *w, cairo_t *cr, int base, int x, int y, int l
 
 static bool is_live(enum kind k) {
 	/* these act at once (network, Bluetooth...), so they have Close rather than OK/Cancel/Apply */
-	return k == K_NETWORK || k == K_BLUETOOTH || k == K_SYSTEM || k == K_DEFAULTS;
+	return k == K_NETWORK || k == K_BLUETOOTH || k == K_PRINTERS || k == K_SYSTEM || k == K_DEFAULTS;
 }
 
 static void tabs_and_buttons(struct sheet *s, cairo_t *cr) {
@@ -1673,9 +1942,57 @@ static void paint_mouse(struct sheet *s, cairo_t *cr) {
 	}
 }
 
+static const char *prn_label(int i) {
+	static char buf[220];
+	char q[24] = "";
+	if (prns[i].jobs)
+		snprintf(q, sizeof(q), ", %d document%s", prns[i].jobs, prns[i].jobs == 1 ? "" : "s");
+	snprintf(buf, sizeof(buf), "%s%s   -   %s%s%s%s", prns[i].name, prns[i].def ? "  (Default)" : "", prns[i].state, q,
+		prns[i].info[0] ? "   " : "", prns[i].info);
+	return buf;
+}
+
+static const char *job_label(int i) {
+	static char buf[200];
+	snprintf(buf, sizeof(buf), "%s   %s   %s bytes   %s", jobs[i].id, jobs[i].user, jobs[i].size, jobs[i].when);
+	return buf;
+}
+
+static void paint_printers(struct sheet *s, cairo_t *cr) {
+	struct ui_win *w = s->win;
+	if (!have_cups) {
+		hint(cr, 24, 50, "Printing needs CUPS. Install \"cups\" from Add or Remove Programs\n(Add New Programs), then open this again.");
+		return;
+	}
+	ui_text(cr, "Tahoma Bold 8", "Printers", 18, 40, 0, 0x000000);
+	listbox(w, cr, ID_LIST, 18, 58, SHEET_W - 36, 120, n_prn, prn_sel, &s->scroll, &s->list_box, prn_label, NULL, 20);
+	if (!n_prn)
+		hint(cr, 28, 66, "No printers yet. Click Add a printer: Expede finds\nnetwork and USB printers for you.");
+	bool sel = prn_sel >= 0 && prn_sel < n_prn;
+	ui_button(w, cr, ID_PRN_ADD, 18, 186, 110, "Add a printer...", false, false);
+	ui_button(w, cr, ID_PRN_DEFAULT, 134, 186, 110, "Set as Default", !sel || (sel && prns[prn_sel].def), false);
+	ui_button(w, cr, ID_PRN_TEST, 250, 186, 110, "Print Test Page", !sel, false);
+	ui_button(w, cr, ID_PRN_PAUSE, 18, 214, 110, sel && prns[prn_sel].paused ? "Resume Printing" : "Pause Printing", !sel, false);
+	ui_button(w, cr, ID_PRN_PREFS, 134, 214, 110, "Preferences...", !sel, false);
+	ui_button(w, cr, ID_PRN_DELETE, 250, 214, 110, "Delete", !sel, false);
+	ui_text(cr, "Tahoma Bold 8", "See what's printing", 18, 252, 0, 0x000000);
+	listbox(w, cr, ID_LIST2, 18, 270, SHEET_W - 36, 96, n_jobs, job_sel, &s->scroll2, &s->list2_box, job_label, NULL, 18);
+	if (sel && !n_jobs)
+		hint(cr, 28, 278, "Nothing waiting to print.");
+	ui_button(w, cr, ID_JOB_CANCEL, 18, 374, 110, "Cancel", job_sel < 0 || job_sel >= n_jobs, false);
+	ui_button(w, cr, ID_JOB_CANCEL_ALL, 134, 374, 110, "Cancel All", !n_jobs, false);
+	if (prn_message[0])
+		hint(cr, 18, 404, prn_message);
+}
+
 static const char *bt_label(int i) {
-	static char buf[128];
-	snprintf(buf, sizeof(buf), "%s%s", bts[i].name, bts[i].connected ? "   (Connected)" : bts[i].paired ? "   (Paired)" : "");
+	static char buf[192];
+	char bat[24] = "";
+	if (bts[i].battery >= 0)
+		snprintf(bat, sizeof(bat), ", battery %d%%", bts[i].battery);
+	snprintf(buf, sizeof(buf), "%s%s%s%s%s%s", bts[i].name, bts[i].kind[0] ? "  -  " : "", bts[i].kind,
+		bts[i].connected ? "   (Connected" : bts[i].paired ? "   (Paired" : "", bat,
+		bts[i].connected || bts[i].paired ? ")" : "");
 	return buf;
 }
 
@@ -1692,7 +2009,25 @@ static void paint_bluetooth(struct sheet *s, cairo_t *cr) {
 	ui_button(w, cr, sel && bts[bt_sel].connected ? ID_BT_DISCONNECT : ID_BT_CONNECT, 104, 306, 80,
 		sel && bts[bt_sel].connected ? "Disconnect" : "Connect", !sel || !bt_powered, false);
 	ui_button(w, cr, ID_BT_REMOVE, 190, 306, 80, "Remove", !sel, false);
-	hint(cr, 18, 340, "Put a device in pairing mode, then click Add to search\nfor it for a few seconds.");
+	if (bt_prompt == 1) {
+		ui_group(cr, 16, 336, SHEET_W - 32, 74, "Pairing");
+		char t[200];
+		snprintf(t, sizeof(t), "Does %s show this passkey?   %s", bt_name(bt_pairing), bt_prompt_text);
+		ui_text(cr, "Tahoma 8", t, 28, 356, SHEET_W - 56, 0x000000);
+		ui_button(w, cr, ID_BT_YES, 28, 378, 75, "Yes", false, true);
+		ui_button(w, cr, ID_BT_NO, 110, 378, 75, "No", false, false);
+	} else if (bt_prompt == 2) {
+		ui_group(cr, 16, 336, SHEET_W - 32, 74, "Pairing");
+		ui_text(cr, "Tahoma 8", "Type the device's PIN (often 0000 or 1234):", 28, 356, SHEET_W - 56, 0x000000);
+		ui_field(w, cr, ID_BT_PIN, 28, 376, 120, 21, bt_pin, true, bt_pin_caret);
+		ui_button(w, cr, ID_BT_YES, 156, 376, 75, "OK", false, true);
+	} else if (bt_status[0]) {
+		hint(cr, 18, 340, bt_status);
+	} else if (bt_scanning) {
+		hint(cr, 18, 340, "Searching for Bluetooth devices... New ones appear in the list\nas they're found. Select one and click Connect.");
+	} else {
+		hint(cr, 18, 340, "Put a device in pairing mode, then click Add to search for it.");
+	}
 }
 
 /* ---------------------------------------------------------------- Users, Date and time */
@@ -1891,6 +2226,7 @@ static void sheet_paint(struct ui_win *w, cairo_t *cr) {
 	case K_POWER: paint_power(s, cr); break;
 	case K_MOUSE: paint_mouse(s, cr); break;
 	case K_BLUETOOTH: paint_bluetooth(s, cr); break;
+	case K_PRINTERS: paint_printers(s, cr); break;
 	case K_USERS: paint_users(s, cr); break;
 	case K_DATETIME: paint_datetime(s, cr); break;
 	default: break;
@@ -1964,6 +2300,15 @@ static void list_pick(struct sheet *s, int i, bool second, int clicks) {
 		}
 		break;
 	case K_BLUETOOTH: bt_sel = i; break;
+	case K_PRINTERS:
+		if (!second) {
+			prn_sel = i;
+			job_sel = -1;
+			jobs_refresh();
+		} else {
+			job_sel = i;
+		}
+		break;
 	case K_USERS:
 		if (i < n_pictures) {
 			snprintf(cfg.picture, sizeof(cfg.picture), "%s", pictures[i].value);
@@ -2141,16 +2486,77 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 		bt_refresh();
 		break;
 	case ID_BT_SCAN:
-		run("bluetoothctl --timeout 8 scan on >/dev/null 2>&1");
-		bt_refresh();
+		btc_start();
+		bt_status[0] = 0;
+		btc_send("%s", "scan on");
+		bt_scanning = true;
+		ui_after(30000, bt_scan_stop, NULL);
 		break;
 	case ID_BT_CONNECT:
-		if (bt_sel >= 0 && bt_sel < n_bt && !bts[bt_sel].paired) {
-			bt_cmd("pair");
-			bt_cmd("trust");
+		if (bt_sel < 0 || bt_sel >= n_bt)
+			break;
+		btc_start();
+		snprintf(bt_pairing, sizeof(bt_pairing), "%s", bts[bt_sel].mac);
+		if (btc_in >= 0) {
+			/* the agent answers any passkey question in this dialog */
+			snprintf(bt_status, sizeof(bt_status), "Connecting to %s...", bts[bt_sel].name);
+			btc_send(bts[bt_sel].paired ? "connect %s" : "pair %s", bts[bt_sel].mac);
+		} else {
+			if (!bts[bt_sel].paired) {
+				bt_cmd("pair");
+				bt_cmd("trust");
+			}
+			bt_cmd("connect");
+			bt_refresh();
 		}
-		bt_cmd("connect");
-		bt_refresh();
+		break;
+	case ID_PRN_ADD:
+		/* the system's printer wizard finds USB and network printers; CUPS' own page otherwise */
+		spawn(have("system-config-printer") ? "system-config-printer --show-jobs ''" : "xdg-open http://localhost:631/admin");
+		break;
+	case ID_PRN_DEFAULT: prn_cmd("lpoptions -d %s", false); break;
+	case ID_PRN_TEST:
+		prn_cmd("lp -d %s -t 'Test Page' /usr/share/cups/data/testprint", false);
+		if (!prn_message[0])
+			snprintf(prn_message, sizeof(prn_message), "A test page was sent to the printer.");
+		break;
+	case ID_PRN_PAUSE:
+		prn_cmd(prn_sel >= 0 && prn_sel < n_prn && prns[prn_sel].paused ? "cupsenable %s" : "cupsdisable %s", false);
+		break;
+	case ID_PRN_DELETE: prn_cmd("lpadmin -x %s", true); prn_sel = -1; prn_refresh(); break;
+	case ID_PRN_PREFS:
+		if (prn_sel >= 0 && prn_sel < n_prn) {
+			char q[160], cmd[300];
+			ui_shell_quote(prns[prn_sel].name, q, sizeof(q));
+			if (have("system-config-printer"))
+				snprintf(cmd, sizeof(cmd), "system-config-printer --show-printer=%s", q);
+			else
+				snprintf(cmd, sizeof(cmd), "xdg-open http://localhost:631/printers/%s", prns[prn_sel].name);
+			spawn(cmd);
+		}
+		break;
+	case ID_JOB_CANCEL:
+		if (job_sel >= 0 && job_sel < n_jobs) {
+			char q[100], cmd[160];
+			snprintf(cmd, sizeof(cmd), "cancel %s >/dev/null 2>&1", ui_shell_quote(jobs[job_sel].id, q, sizeof(q)));
+			run(cmd);
+			job_sel = -1;
+			prn_refresh();
+		}
+		break;
+	case ID_JOB_CANCEL_ALL: prn_cmd("cancel -a %s", false); break;
+	case ID_BT_YES:
+		if (bt_prompt == 2)
+			btc_send("%s", bt_pin);
+		else
+			btc_send("%s", "yes");
+		bt_prompt = 0;
+		snprintf(bt_status, sizeof(bt_status), "Pairing with %s...", bt_name(bt_pairing));
+		break;
+	case ID_BT_NO:
+		btc_send("%s", "no");
+		bt_prompt = 0;
+		bt_status[0] = 0;
 		break;
 	case ID_BT_DISCONNECT: bt_cmd("disconnect"); bt_refresh(); break;
 	case ID_BT_REMOVE: bt_cmd("remove"); bt_sel = -1; bt_refresh(); break;
@@ -2288,6 +2694,16 @@ static void sheet_key(struct ui_win *w, xkb_keysym_t sym, const char *utf8, int 
 		}
 		return;
 	}
+	if (s->kind == K_BLUETOOTH && bt_prompt == 2) {
+		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			btc_send("%s", bt_pin);
+			bt_prompt = 0;
+			redraw_all();
+		} else {
+			ui_edit(bt_pin, sizeof(bt_pin), &bt_pin_caret, sym, utf8, mods);
+		}
+		return;
+	}
 	if (s->kind == K_NETWORK && s->tab == 0 && wifi_sel >= 0) {
 		if (sym == XKB_KEY_Return)
 			wifi_connect();
@@ -2309,7 +2725,8 @@ static void open_applet(enum kind k) {
 	*s = (struct sheet){.kind = k};
 	switch (k) {
 	case K_NETWORK: net_refresh(false); break;
-	case K_BLUETOOTH: bt_refresh(); break;
+	case K_BLUETOOTH: bt_refresh(); btc_start(); break;
+	case K_PRINTERS: prn_refresh(); break;
 	case K_SOUNDS: sound_refresh(); break;
 	case K_POWER: power_refresh(); break;
 	case K_SYSTEM: system_refresh(); break;

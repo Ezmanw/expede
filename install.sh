@@ -15,7 +15,7 @@ if command -v apt-get >/dev/null 2>&1; then
 		"$WLR_PKG" wayland-protocols libwayland-dev libxkbcommon-dev libcairo2-dev \
 		libpango1.0-dev libpixman-1-dev libinput-dev libgdk-pixbuf-2.0-dev libdrm-dev \
 		foot mousepad network-manager bluez power-profiles-daemon pcmanfm-qt \
-		qt6-wayland qtwayland5 fonts-dejavu-core alsa-utils brightnessctl wl-clipboard
+		qt6-wayland qtwayland5 fonts-dejavu-core alsa-utils brightnessctl wl-clipboard cups cups-client system-config-printer
 	sudo apt-get install -y lxpolkit qt6-gtk-platformtheme qt5-gtk-platformtheme 2>/dev/null || true
 elif command -v pacman >/dev/null 2>&1; then
 	WLR_PKG="wlroots0.18"

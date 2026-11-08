@@ -708,6 +708,40 @@ static bool any_window(void) {
 	return false;
 }
 
+/* ---- extra fds and timers for apps that talk to helpers (bluetoothctl...) ---- */
+
+struct watch { int fd; void (*cb)(int, void *); void *data; };
+static struct watch watches[8];
+static int n_watches;
+struct timer { void (*cb)(void *); void *data; uint64_t at; };
+static struct timer timers[8];
+static int n_timers;
+
+void ui_watch(int fd, void (*cb)(int fd, void *data), void *data) {
+	ui_unwatch(fd);
+	if (n_watches < 8)
+		watches[n_watches++] = (struct watch){fd, cb, data};
+}
+
+void ui_unwatch(int fd) {
+	for (int i = 0; i < n_watches; i++)
+		if (watches[i].fd == fd) {
+			watches[i] = watches[--n_watches];
+			return;
+		}
+}
+
+void ui_after(int ms, void (*cb)(void *data), void *data) {
+	for (int i = 0; i < n_timers; i++)
+		if (timers[i].cb == cb) {
+			timers[i].at = now_ms() + ms;
+			timers[i].data = data;
+			return;
+		}
+	if (n_timers < 8)
+		timers[n_timers++] = (struct timer){cb, data, now_ms() + ms};
+}
+
 int ui_run(void) {
 	while (!u.quit && any_window()) {
 		while (wl_display_prepare_read(u.display) != 0)
@@ -717,18 +751,40 @@ int ui_run(void) {
 			return 1;
 		}
 		int timeout = -1;
-		if (u.repeating) {
-			uint64_t t = now_ms();
+		uint64_t t = now_ms();
+		if (u.repeating)
 			timeout = u.repeat_next_ms > t ? (int)(u.repeat_next_ms - t) : 0;
+		for (int i = 0; i < n_timers; i++) {
+			int left = timers[i].at > t ? (int)(timers[i].at - t) : 0;
+			if (timeout < 0 || left < timeout)
+				timeout = left;
 		}
-		struct pollfd pfd = {wl_display_get_fd(u.display), POLLIN, 0};
-		if (poll(&pfd, 1, timeout) > 0) {
+		struct pollfd pfd[9] = {{wl_display_get_fd(u.display), POLLIN, 0}};
+		int nw = n_watches;
+		for (int i = 0; i < nw; i++)
+			pfd[1 + i] = (struct pollfd){watches[i].fd, POLLIN, 0};
+		if (poll(pfd, 1 + nw, timeout) > 0 && (pfd[0].revents & POLLIN)) {
 			if (wl_display_read_events(u.display) < 0)
 				return 1;
 		} else {
 			wl_display_cancel_read(u.display);
 		}
 		wl_display_dispatch_pending(u.display);
+		for (int i = 0; i < nw; i++)
+			if (pfd[1 + i].revents)
+				for (int j = 0; j < n_watches; j++)
+					if (watches[j].fd == pfd[1 + i].fd) {
+						watches[j].cb(watches[j].fd, watches[j].data);
+						break;
+					}
+		t = now_ms();
+		for (int i = 0; i < n_timers; i++)
+			if (timers[i].at <= t) {
+				void (*cb)(void *) = timers[i].cb;
+				void *data = timers[i].data;
+				timers[i--] = timers[--n_timers];
+				cb(data);
+			}
 		if (u.repeating && now_ms() >= u.repeat_next_ms) {
 			deliver_key(u.repeat_key);
 			u.repeat_next_ms = now_ms() + 1000 / (u.repeat_rate ? u.repeat_rate : 25);
