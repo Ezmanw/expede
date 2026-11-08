@@ -297,6 +297,7 @@ int draw_text(cairo_t *cr, const char *font, const char *text, double x, double 
 	set_rgb(cr, rgb);
 	cairo_move_to(cr, x, y);
 	pango_cairo_show_layout(cr, l);
+	cairo_new_path(cr); /* leave no current point for the next path to join up with */
 	g_object_unref(l);
 	return w;
 }

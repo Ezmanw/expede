@@ -1063,6 +1063,7 @@ static void paint_toolbar(struct ui_win *w, cairo_t *cr) {
 			draw_image(cr, &ui_theme.w7_crumb_btn, ui_state(w, ID_GO) == 2 ? 2 : 1, gx, fy + 1, 21, fh - 2);
 		cairo_set_source_rgb(cr, 0.18, 0.36, 0.62);
 		cairo_set_line_width(cr, 1.5);
+		cairo_new_path(cr); /* the crumb text left a current point: don't draw a line from it */
 		cairo_arc(cr, gx + 10.5, fy + 12, 4.5, 0.6, 5.2);
 		cairo_stroke(cr);
 		ui_reg(w, ID_GO, gx, fy, 22, fh);
