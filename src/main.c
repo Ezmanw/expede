@@ -2199,7 +2199,7 @@ static void on_new_input(struct wl_listener *l, void *data) {
 		k->server = s;
 		k->wlr_keyboard = wlr_keyboard_from_input_device(dev);
 		apply_keymap(s, k->wlr_keyboard);
-		wlr_keyboard_set_repeat_info(k->wlr_keyboard, 25, 600);
+		wlr_keyboard_set_repeat_info(k->wlr_keyboard, s->opt_repeat_rate, s->opt_repeat_delay);
 		k->modifiers.notify = kb_modifiers;
 		wl_signal_add(&k->wlr_keyboard->events.modifiers, &k->modifiers);
 		k->key.notify = kb_key;
@@ -2501,6 +2501,9 @@ static void load_config(struct server *s) {
 	s->style = s->have_xp ? 0 : 7;
 	s->st_frames = s->st_taskbar = s->st_start = s->st_logon = s->st_sounds = s->st_cursors = s->st_icons = -1;
 	s->opt_glass = true;
+	s->opt_repeat_rate = 25;
+	s->opt_repeat_delay = 600;
+	s->opt_cursor_size = 32;
 	/* Windows 10's defaults: blue accent, dark taskbar and Start, transparency on */
 	s->accent_rgb = 0x0078d7;
 	s->opt_dark = true;
@@ -2558,6 +2561,12 @@ static void load_config(struct server *s) {
 			int st = conf_style(val);
 			s->style = st == 7 && s->have7 ? 7 : st == 10 && s->have10 ? 10 : s->have_xp ? 0 : s->have7 ? 7 : 10;
 		}
+		else if (!strcmp(key, "repeat_rate"))
+			s->opt_repeat_rate = atoi(val) < 1 ? 1 : atoi(val) > 60 ? 60 : atoi(val);
+		else if (!strcmp(key, "repeat_delay"))
+			s->opt_repeat_delay = atoi(val) < 150 ? 150 : atoi(val) > 1500 ? 1500 : atoi(val);
+		else if (!strcmp(key, "pointer_size"))
+			s->opt_cursor_size = atoi(val) >= 64 ? 64 : atoi(val) >= 48 ? 48 : 32;
 		else if (!strcmp(key, "accent_color"))
 			s->accent_rgb = conf_color(val);
 		else if (!strcmp(key, "dark_mode"))
@@ -2687,11 +2696,15 @@ static void apply_desktop(struct server *s) {
 static void apply_env(struct server *s) {
 	const char *cur = s->st_cursors == 10 ? "expede-10" : s->st_cursors == 7 ? "expede-7" : "expede-xp";
 	setenv("XCURSOR_THEME", cur, true);
-	if (strcmp(cur, s->cursor_theme)) {
+	char size[8];
+	snprintf(size, sizeof(size), "%d", s->opt_cursor_size);
+	setenv("XCURSOR_SIZE", size, true);
+	if (strcmp(cur, s->cursor_theme) || s->cursor_size != s->opt_cursor_size) {
 		snprintf(s->cursor_theme, sizeof(s->cursor_theme), "%s", cur);
+		s->cursor_size = s->opt_cursor_size;
 		if (s->cursor_mgr) {
 			wlr_xcursor_manager_destroy(s->cursor_mgr);
-			s->cursor_mgr = wlr_xcursor_manager_create(cur, 32);
+			s->cursor_mgr = wlr_xcursor_manager_create(cur, s->cursor_size);
 			wlr_cursor_set_xcursor(s->cursor, s->cursor_mgr, "default");
 		}
 	}
@@ -2750,8 +2763,10 @@ static int on_sighup(int sig, void *data) {
 	wl_list_for_each(p, &s->pointers, link)
 		configure_pointer(s, p->dev);
 	struct keyboard *k;
-	wl_list_for_each(k, &s->keyboards, link)
+	wl_list_for_each(k, &s->keyboards, link) {
 		apply_keymap(s, k->wlr_keyboard);
+		wlr_keyboard_set_repeat_info(k->wlr_keyboard, s->opt_repeat_rate, s->opt_repeat_delay);
+	}
 	apply_desktop(s);
 	apply_env(s);
 	session_layout(s->session);
@@ -2870,7 +2885,6 @@ int main(int argc, char *argv[]) {
 	snprintf(cpath, sizeof(cpath), "%s/cursors:%s/cursors:%s/cursors:%s", default_assets(), dir7, dir10,
 		old ? old : "/usr/share/icons:/usr/share/pixmaps");
 	setenv("XCURSOR_PATH", cpath, true);
-	setenv("XCURSOR_SIZE", "32", true);
 	s.own_gtk_theme = !getenv("GTK_THEME");
 	apply_env(&s);
 	apply_desktop(&s);
@@ -2919,7 +2933,7 @@ int main(int argc, char *argv[]) {
 
 	s.cursor = wlr_cursor_create();
 	wlr_cursor_attach_output_layout(s.cursor, s.output_layout);
-	s.cursor_mgr = wlr_xcursor_manager_create(s.cursor_theme, 32);
+	s.cursor_mgr = wlr_xcursor_manager_create(s.cursor_theme, s.cursor_size ? s.cursor_size : 32);
 	s.cursor_motion.notify = on_cursor_motion;
 	wl_signal_add(&s.cursor->events.motion, &s.cursor_motion);
 	s.cursor_motion_abs.notify = on_cursor_motion_abs;

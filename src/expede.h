@@ -88,6 +88,8 @@ struct server {
 	char cursor_theme[32];
 	bool own_gtk_theme;
 	bool super_alone;
+	int opt_repeat_rate, opt_repeat_delay; /* keys per second, ms before repeating */
+	int opt_cursor_size, cursor_size;      /* pointer size in px (32 normal, 48 large, 64 extra) */
 	bool greeter; /* expede -g: the login screen for greetd */ /* Win is down and nothing else has been pressed with it */
 
 	enum grab_mode grab;

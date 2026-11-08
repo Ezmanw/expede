@@ -20,6 +20,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -38,6 +39,7 @@ struct config {
 	char accent[16];
 	bool dark, transparency, accent_titlebars;
 	bool wall_set; /* a wallpaper was chosen; otherwise each Windows version shows its own */
+	int repeat_rate, repeat_delay, pointer_size;
 	char wallpaper[256], wall_style[16], picture[64], keyboard[64];
 	char style[16], glass_color[32], frames[16], taskbar[16], start_menu[16], logon[16], sound_scheme[16], pointers[16], icons[16];
 	struct { char name[32], mode[32]; bool disabled, has_pos, primary; int x, y, rotation; } out[8];
@@ -74,6 +76,9 @@ static void config_load(void) {
 	cfg.screen_off = 10;
 	cfg.glass_intensity = 45;
 	snprintf(cfg.accent, sizeof(cfg.accent), "0078d7");
+	cfg.repeat_rate = 25;
+	cfg.repeat_delay = 600;
+	cfg.pointer_size = 32;
 	cfg.dark = cfg.transparency = true;
 	snprintf(cfg.wallpaper, sizeof(cfg.wallpaper), "Bliss.jpg");
 	snprintf(cfg.wall_style, sizeof(cfg.wall_style), "auto");
@@ -119,6 +124,9 @@ static void config_load(void) {
 		else if (!strcmp(key, "glass")) cfg.glass = truthy(val);
 		else if (!strcmp(key, "accent_color")) snprintf(cfg.accent, sizeof(cfg.accent), "%s", val[0] == '#' ? val + 1 : val);
 		else if (!strcmp(key, "dark_mode")) cfg.dark = truthy(val);
+		else if (!strcmp(key, "repeat_rate")) cfg.repeat_rate = atoi(val);
+		else if (!strcmp(key, "repeat_delay")) cfg.repeat_delay = atoi(val);
+		else if (!strcmp(key, "pointer_size")) cfg.pointer_size = atoi(val);
 		else if (!strcmp(key, "transparency")) cfg.transparency = truthy(val);
 		else if (!strcmp(key, "accent_titlebars")) cfg.accent_titlebars = truthy(val);
 		else if (!strcmp(key, "glass_color")) snprintf(cfg.glass_color, sizeof(cfg.glass_color), "%s", val);
@@ -173,6 +181,8 @@ static void config_save(void) {
 	fprintf(f, "glass_color = %s\n", cfg.glass_color);
 	fprintf(f, "glass_intensity = %d\n", cfg.glass_intensity);
 	fprintf(f, "accent_color = %s\n", cfg.accent);
+	fprintf(f, "repeat_rate = %d\nrepeat_delay = %d\npointer_size = %d\n", cfg.repeat_rate, cfg.repeat_delay,
+		cfg.pointer_size);
 	fprintf(f, "dark_mode = %s\n", cfg.dark ? "true" : "false");
 	fprintf(f, "transparency = %s\n", cfg.transparency ? "true" : "false");
 	fprintf(f, "accent_titlebars = %s\n", cfg.accent_titlebars ? "true" : "false");
@@ -1061,7 +1071,7 @@ static void list_dir(const char *dir, struct choice **out, int *n, bool wallpape
 
 enum kind {
 	K_CP, K_DISPLAY, K_PERSONALIZE, K_TASKBAR, K_NETWORK, K_PROGRAMS, K_DEFAULTS, K_SOUNDS, K_SYSTEM, K_POWER,
-	K_MOUSE, K_BLUETOOTH, K_PRINTERS, K_USERS, K_DATETIME, K_COUNT
+	K_MOUSE, K_BLUETOOTH, K_PRINTERS, K_USERS, K_DATETIME, K_KEYBOARD, K_ACCESS, K_CLEANUP, K_UPDATES, K_COUNT
 };
 
 static const struct applet {
@@ -1081,6 +1091,11 @@ static const struct applet {
 	[K_BLUETOOTH] = {"bluetooth", "Bluetooth Devices", "Bluetooth Devices", "network", {"Devices", NULL}},
 	[K_USERS] = {"users", "User Accounts", "User Accounts", "cp-users", {"Picture", NULL}},
 	[K_PRINTERS] = {"printers", "Printers and Faxes", "Printers and Faxes", "cp-printer", {"Printers", NULL}},
+	[K_KEYBOARD] = {"keyboard", "Keyboard", "Keyboard Properties", "cp-hardware", {"Speed", NULL}},
+	[K_ACCESS] = {"accessibility", "Accessibility Options", "Accessibility Options", "cp-accessibility",
+		{"Display", "Mouse", NULL}},
+	[K_CLEANUP] = {"cleanup", "Disk Cleanup", "Disk Cleanup", "cp-performance", {"Disk Cleanup", NULL}},
+	[K_UPDATES] = {"updates", "Automatic Updates", "Automatic Updates", "cp-security", {"Updates", NULL}},
 	[K_DATETIME] = {"datetime", "Date, Time and Keyboard", "Date and Time Properties", "cp-datetime", {"Date & Time", "Time Zone", "Keyboard", NULL}},
 };
 
@@ -1090,10 +1105,12 @@ static const struct category { const char *name, *icon, *blurb; enum kind items[
 	{"Network and Internet\nConnections", "cp-network", "Connect to wireless networks and see your connections.", {K_NETWORK}},
 	{"Add or Remove Programs", "cp-programs", "Remove programs, or choose which program opens what.", {K_PROGRAMS, K_DEFAULTS}},
 	{"Sounds, Speech, and Audio\nDevices", "cp-sounds", "Change the volume, sound scheme or speakers.", {K_SOUNDS}},
-	{"Performance and\nMaintenance", "cp-performance", "See information about your computer, and power settings.", {K_SYSTEM, K_POWER}},
-	{"Printers and Other\nHardware", "cp-hardware", "Add a printer, change mouse and touchpad settings, or add Bluetooth devices.", {K_PRINTERS, K_MOUSE, K_BLUETOOTH}},
+	{"Performance and\nMaintenance", "cp-performance", "See information about your computer, free up disk space, and power settings.", {K_SYSTEM, K_CLEANUP, K_POWER}},
+	{"Printers and Other\nHardware", "cp-hardware", "Add a printer, change mouse, keyboard and touchpad settings, or add Bluetooth devices.", {K_PRINTERS, K_MOUSE, K_KEYBOARD, K_BLUETOOTH}},
 	{"User Accounts", "cp-users", "Change your account picture.", {K_USERS}},
 	{"Date, Time, Language, and\nRegional Options", "cp-datetime", "Change the clock, time zone or keyboard layout.", {K_DATETIME}},
+	{"Accessibility Options", "cp-accessibility", "Make text and the mouse pointer bigger and easier to see.", {K_ACCESS}},
+	{"Security Center", "cp-security", "Keep your computer up to date with the latest updates.", {K_UPDATES}},
 };
 #define N_CATS ((int)(sizeof(categories) / sizeof(*categories)))
 
@@ -1107,7 +1124,7 @@ enum {
 	ID_WIFI_CONNECT, ID_WIFI_DISCONNECT, ID_WIFI_PW, ID_BT_POWER, ID_BT_SCAN, ID_BT_CONNECT, ID_BT_DISCONNECT,
 	ID_BT_REMOVE, ID_BT_YES, ID_BT_NO, ID_BT_PIN, ID_PRN_ADD, ID_PRN_DEFAULT, ID_PRN_TEST, ID_PRN_PAUSE, ID_PRN_DELETE, ID_PRN_PREFS, ID_JOB_CANCEL, ID_JOB_CANCEL_ALL, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_PRIMARY, ID_DUPLICATE, ID_ROT0, ID_ROT90, ID_ROT180, ID_ROT270, ID_REMOVE_PROG,
 	ID_CHANGE_PROGS, ID_ADD_PROGS, ID_SEARCH_PKGS, ID_INSTALL_PKG, ID_PKG_TERM, ID_PKG_QUERY,
-	ID_SET_ZONE, ID_XP_STYLE, ID_W7_STYLE, ID_W10_STYLE, ID_DARK, ID_TRANSPARENCY, ID_ACCENT_BARS, ID_GLASS_ON, ID_GLASS_INTENSITY,
+	ID_SET_ZONE, ID_XP_STYLE, ID_W7_STYLE, ID_W10_STYLE, ID_DARK, ID_TRANSPARENCY, ID_ACCENT_BARS, ID_REPEAT_DELAY, ID_REPEAT_RATE, ID_REPEAT_TEST, ID_PTR_NORMAL, ID_PTR_LARGE, ID_PTR_XL, ID_TEXT_NORMAL, ID_TEXT_LARGE, ID_TEXT_XL, ID_CLEAN, ID_UPD_CHECK, ID_UPD_INSTALL, ID_GLASS_ON, ID_GLASS_INTENSITY,
 	ID_START_XP, ID_START_SEARCH, ID_START_W7, ID_OPEN_PERSONALIZE,
 	ID_SINGLE_END,        /* the ranges below must start above this */
 	ID_TAB = 500,         /* + tab */
@@ -1129,6 +1146,7 @@ struct sheet {
 	enum kind kind;
 	struct ui_win *win;
 	int tab, scroll, scroll2;
+	int focus; /* a text box that has the keyboard */
 	struct ui_rect list_box, list2_box;
 	bool dragging;
 };
@@ -1249,7 +1267,8 @@ static void listbox(struct ui_win *w, cairo_t *cr, int base, int x, int y, int l
 
 static bool is_live(enum kind k) {
 	/* these act at once (network, Bluetooth...), so they have Close rather than OK/Cancel/Apply */
-	return k == K_NETWORK || k == K_BLUETOOTH || k == K_PRINTERS || k == K_SYSTEM || k == K_DEFAULTS;
+	return k == K_NETWORK || k == K_BLUETOOTH || k == K_PRINTERS || k == K_SYSTEM || k == K_DEFAULTS || k == K_CLEANUP ||
+		k == K_UPDATES;
 }
 
 static void tabs_and_buttons(struct sheet *s, cairo_t *cr) {
@@ -2095,6 +2114,212 @@ static void paint_bluetooth(struct sheet *s, cairo_t *cr) {
 	}
 }
 
+/* ---------------------------------------------------------------- Keyboard, Accessibility */
+
+static char repeat_test[64];
+static int repeat_caret;
+
+static void paint_keyboard(struct sheet *s, cairo_t *cr) {
+	struct ui_win *w = s->win;
+	ui_group(cr, 16, 40, SHEET_W - 32, 200, "Character repeat");
+	ui_text(cr, "Tahoma 8", "Repeat delay:", 30, 64, 0, 0x000000);
+	ui_text(cr, "Tahoma 8", "Long", 48, 86, 0, 0x000000);
+	ui_text(cr, "Tahoma 8", "Short", SHEET_W - 76, 86, 0, 0x000000);
+	/* delay 1500..150 ms reads left to right as long to short */
+	slider(w, cr, ID_REPEAT_DELAY, 84, 82, SHEET_W - 176, (1500 - cfg.repeat_delay) * 100 / 1350,
+		s->dragging && w->pressed == ID_REPEAT_DELAY);
+	ui_text(cr, "Tahoma 8", "Repeat rate:", 30, 124, 0, 0x000000);
+	ui_text(cr, "Tahoma 8", "Slow", 48, 146, 0, 0x000000);
+	ui_text(cr, "Tahoma 8", "Fast", SHEET_W - 76, 146, 0, 0x000000);
+	slider(w, cr, ID_REPEAT_RATE, 84, 142, SHEET_W - 176, (cfg.repeat_rate - 1) * 100 / 59,
+		s->dragging && w->pressed == ID_REPEAT_RATE);
+	ui_text(cr, "Tahoma 8", "Click here and hold down a key to test repeat rate:", 30, 184, 0, 0x000000);
+	ui_field(w, cr, ID_REPEAT_TEST, 30, 202, SHEET_W - 76, 21, repeat_test, s->focus == ID_REPEAT_TEST, repeat_caret);
+	hint(cr, 18, 256, "The keyboard layout is under Date, Time, Language,\nand Regional Options.");
+}
+
+static void paint_access(struct sheet *s, cairo_t *cr) {
+	struct ui_win *w = s->win;
+	if (s->tab == 0) {
+		ui_group(cr, 16, 40, SHEET_W - 32, 120, "Text and items");
+		hint(cr, 30, 62, "Make everything on the screen bigger and easier to read.");
+		ui_check(w, cr, ID_TEXT_NORMAL, 30, 90, cfg.scale_pct == 0 || cfg.scale_pct == 100, true, "Normal");
+		ui_check(w, cr, ID_TEXT_LARGE, 30, 112, cfg.scale_pct == 125 || cfg.scale_pct == 150, true, "Large (150%)");
+		ui_check(w, cr, ID_TEXT_XL, 30, 134, cfg.scale_pct >= 175, true, "Extra large (200%)");
+	} else {
+		ui_group(cr, 16, 40, SHEET_W - 32, 120, "Mouse pointer size");
+		hint(cr, 30, 62, "A bigger pointer is easier to find and follow.");
+		ui_check(w, cr, ID_PTR_NORMAL, 30, 90, cfg.pointer_size < 48, true, "Normal");
+		ui_check(w, cr, ID_PTR_LARGE, 30, 112, cfg.pointer_size == 48, true, "Large");
+		ui_check(w, cr, ID_PTR_XL, 30, 134, cfg.pointer_size >= 64, true, "Extra large");
+		ui_check(w, cr, ID_NATURAL, 30, 180, cfg.natural, false, "Natural scrolling on the touchpad");
+	}
+}
+
+/* ---------------------------------------------------------------- Disk Cleanup */
+
+struct drive { char path[128]; double total, avail; };
+static struct drive drives[8];
+static int n_drives;
+struct junk { const char *label, *what; char path[512]; long long bytes; bool on, root; };
+static struct junk junk[4];
+static char cleanup_msg[160];
+
+static long long du_bytes(const char *path) {
+	char q[600], cmd[700];
+	snprintf(cmd, sizeof(cmd), "du -sb %s 2>/dev/null | cut -f1", ui_shell_quote(path, q, sizeof(q)));
+	char *o = capture(cmd);
+	long long b = atoll(o);
+	free(o);
+	return b;
+}
+
+static void cleanup_refresh(void) {
+	n_drives = 0;
+	FILE *m = fopen("/proc/mounts", "r");
+	char dev[256], mnt[256], fs[64];
+	while (m && n_drives < 8 && fscanf(m, "%255s %255s %63s %*[^\n]", dev, mnt, fs) == 3) {
+		if (strncmp(dev, "/dev/", 5) || strstr(mnt, "/boot") || strstr(mnt, "/snap") || !strcmp(fs, "squashfs"))
+			continue;
+		struct statvfs v;
+		if (statvfs(mnt, &v) != 0 || !v.f_blocks)
+			continue;
+		bool dup = false;
+		for (int i = 0; i < n_drives; i++)
+			dup |= drives[i].total == (double)v.f_blocks * v.f_frsize;
+		if (dup)
+			continue;
+		struct drive *d = &drives[n_drives++];
+		snprintf(d->path, sizeof(d->path), "%s", mnt);
+		d->total = (double)v.f_blocks * v.f_frsize;
+		d->avail = (double)v.f_bavail * v.f_frsize;
+	}
+	if (m)
+		fclose(m);
+	const char *home = getenv("HOME");
+	junk[0] = (struct junk){"Recycle Bin", "Files you deleted", "", 0, false, false};
+	snprintf(junk[0].path, sizeof(junk[0].path), "%s/.local/share/Trash", home);
+	junk[1] = (struct junk){"Temporary files", "Programs' caches in your home folder", "", 0, true, false};
+	snprintf(junk[1].path, sizeof(junk[1].path), "%s/.cache", home);
+	junk[2] = (struct junk){"Thumbnails", "Small pictures of your files, made again when needed", "", 0, true, false};
+	snprintf(junk[2].path, sizeof(junk[2].path), "%s/.cache/thumbnails", home);
+	junk[3] = (struct junk){"Downloaded program files", "Installers the package manager kept", "/var/cache/apt/archives", 0,
+		false, true};
+	for (int i = 0; i < 4; i++)
+		junk[i].bytes = du_bytes(junk[i].path);
+	/* thumbnails are inside the cache: count them once */
+	if (junk[1].bytes >= junk[2].bytes)
+		junk[1].bytes -= junk[2].bytes;
+}
+
+static void human(double b, char *out, size_t n) {
+	const char *u[] = {"bytes", "KB", "MB", "GB", "TB"};
+	int i = 0;
+	while (b >= 1024 && i < 4) { b /= 1024; i++; }
+	snprintf(out, n, i ? "%.1f %s" : "%.0f %s", b, u[i]);
+}
+
+static void paint_cleanup(struct sheet *s, cairo_t *cr) {
+	struct ui_win *w = s->win;
+	ui_text(cr, "Tahoma Bold 8", "Your drives", 18, 40, 0, 0x000000);
+	for (int i = 0; i < n_drives && i < 3; i++) {
+		struct drive *d = &drives[i];
+		int y = 58 + i * 36;
+		char a[32], t[32], line[160];
+		human(d->avail, a, sizeof(a));
+		human(d->total, t, sizeof(t));
+		snprintf(line, sizeof(line), "%s   -   %s free of %s", d->path, a, t);
+		ui_text(cr, "Tahoma 8", line, 30, y, SHEET_W - 60, 0x000000);
+		int bw = SHEET_W - 60, used = (int)(bw * (1 - d->avail / d->total));
+		ui_fill(cr, 30, y + 16, bw, 10, 0x7f9db9);
+		ui_fill(cr, 31, y + 17, bw - 2, 8, 0xffffff);
+		ui_fill(cr, 31, y + 17, used - 2 > 0 ? used - 2 : 0, 8, d->avail / d->total < 0.1 ? 0xda2626 : 0x26a0da);
+	}
+	int y0 = 58 + (n_drives < 3 ? n_drives : 3) * 36 + 8;
+	ui_group(cr, 16, y0, SHEET_W - 32, 4 * 40 + 30, "Files to delete");
+	long long total = 0;
+	for (int i = 0; i < 4; i++) {
+		int y = y0 + 22 + i * 40;
+		char sz[32];
+		human(junk[i].bytes, sz, sizeof(sz));
+		ui_check(w, cr, ID_LIST + i, 30, y, junk[i].on, false, junk[i].label);
+		ui_text(cr, "Tahoma 8", sz, SHEET_W - 110, y, 80, 0x000000);
+		ui_text(cr, "Tahoma 8", junk[i].what, 49, y + 16, SHEET_W - 90, 0x6d6d6d);
+		if (junk[i].on)
+			total += junk[i].bytes;
+	}
+	char t[32], line[96];
+	human(total, t, sizeof(t));
+	snprintf(line, sizeof(line), "Total amount of disk space you gain: %s", t);
+	int by = y0 + 4 * 40 + 40;
+	ui_text(cr, "Tahoma 8", line, 18, by, 0, 0x000000);
+	ui_button(w, cr, ID_CLEAN, SHEET_W - 18 - 90, by - 4, 90, "Clean up", total == 0, true);
+	if (cleanup_msg[0])
+		hint(cr, 18, by + 26, cleanup_msg);
+}
+
+static void cleanup_run(void) {
+	int done = 0;
+	for (int i = 0; i < 4; i++) {
+		if (!junk[i].on || !junk[i].bytes)
+			continue;
+		char q[600], cmd[800];
+		ui_shell_quote(junk[i].path, q, sizeof(q));
+		if (i == 0)
+			snprintf(cmd, sizeof(cmd), "rm -rf %s/files/* %s/info/* 2>/dev/null", q, q);
+		else if (junk[i].root)
+			snprintf(cmd, sizeof(cmd), "pkexec apt-get clean >/dev/null 2>&1");
+		else if (i == 1)
+			/* caches can go; leave Expede's own and the thumbnails' folder in place */
+			snprintf(cmd, sizeof(cmd), "find %s -mindepth 1 -maxdepth 1 ! -name expede ! -name thumbnails "
+				"-exec rm -rf {} + 2>/dev/null", q);
+		else
+			snprintf(cmd, sizeof(cmd), "rm -rf %s/* 2>/dev/null", q);
+		run(cmd);
+		done++;
+	}
+	cleanup_refresh();
+	snprintf(cleanup_msg, sizeof(cleanup_msg), done ? "Done. The space is free again." : "Nothing to clean up.");
+}
+
+/* ---------------------------------------------------------------- Automatic Updates */
+
+static char updates[64][96];
+static int n_updates, upd_sel = -1;
+static char upd_msg[200];
+
+static const char *upd_label(int i) { return updates[i]; }
+
+static void updates_refresh(void) {
+	n_updates = 0;
+	const char *cmd = have("apt") ? "LC_ALL=C apt list --upgradable 2>/dev/null | sed -n 's|/.*||p'" :
+		have("dnf") ? "dnf -q check-update 2>/dev/null | awk 'NF==3{print $1}'" :
+		have("pacman") ? "pacman -Qu 2>/dev/null | cut -d' ' -f1" : "true";
+	char *out = capture(cmd), *save;
+	for (char *l = strtok_r(out, "\n", &save); l && n_updates < 64; l = strtok_r(NULL, "\n", &save))
+		if (*l && strcmp(l, "Listing..."))
+			snprintf(updates[n_updates++], sizeof(updates[0]), "%s", l);
+	free(out);
+	if (have("flatpak")) {
+		out = capture("flatpak remote-ls --updates --columns=name 2>/dev/null");
+		for (char *l = strtok_r(out, "\n", &save); l && n_updates < 64; l = strtok_r(NULL, "\n", &save))
+			if (*l)
+				snprintf(updates[n_updates++], sizeof(updates[0]), "%s (Flatpak)", l);
+		free(out);
+	}
+	snprintf(upd_msg, sizeof(upd_msg), n_updates ? "%d updates are ready to install." :
+		"Your computer is up to date.", n_updates);
+}
+
+static void paint_updates(struct sheet *s, cairo_t *cr) {
+	struct ui_win *w = s->win;
+	ui_text(cr, "Tahoma Bold 8", upd_msg, 18, 40, SHEET_W - 36, 0x000000);
+	listbox(w, cr, ID_LIST, 18, 62, SHEET_W - 36, 250, n_updates, upd_sel, &s->scroll, &s->list_box, upd_label, NULL, 18);
+	ui_button(w, cr, ID_UPD_CHECK, 18, 322, 130, "Check for updates", false, false);
+	ui_button(w, cr, ID_UPD_INSTALL, 156, 322, 130, "Install updates", !n_updates, true);
+	hint(cr, 18, 356, "Installing opens a window where you type your password\nand can watch it work.");
+}
+
 /* ---------------------------------------------------------------- Users, Date and time */
 
 static void paint_users(struct sheet *s, cairo_t *cr) {
@@ -2292,6 +2517,10 @@ static void sheet_paint(struct ui_win *w, cairo_t *cr) {
 	case K_MOUSE: paint_mouse(s, cr); break;
 	case K_BLUETOOTH: paint_bluetooth(s, cr); break;
 	case K_PRINTERS: paint_printers(s, cr); break;
+	case K_KEYBOARD: paint_keyboard(s, cr); break;
+	case K_ACCESS: paint_access(s, cr); break;
+	case K_CLEANUP: paint_cleanup(s, cr); break;
+	case K_UPDATES: paint_updates(s, cr); break;
 	case K_USERS: paint_users(s, cr); break;
 	case K_DATETIME: paint_datetime(s, cr); break;
 	default: break;
@@ -2366,6 +2595,8 @@ static void list_pick(struct sheet *s, int i, bool second, int clicks) {
 		}
 		break;
 	case K_BLUETOOTH: bt_sel = i; break;
+	case K_CLEANUP: if (i < 4) junk[i].on = !junk[i].on; break;
+	case K_UPDATES: upd_sel = i; break;
 	case K_PRINTERS:
 		if (!second) {
 			prn_sel = i;
@@ -2422,7 +2653,8 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 	if (button != UI_LEFT)
 		return;
 	if (pressed) {
-		if (id == ID_VOLUME || id == ID_SPEED || id == ID_MIC || id == ID_GLASS_INTENSITY) {
+		if (id == ID_VOLUME || id == ID_SPEED || id == ID_MIC || id == ID_GLASS_INTENSITY || id == ID_REPEAT_DELAY ||
+				id == ID_REPEAT_RATE) {
 			s->dragging = true;
 			w->motion(w, x, y, true);
 		}
@@ -2589,6 +2821,26 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 			bt_refresh();
 		}
 		break;
+	case ID_TEXT_NORMAL: cfg.scale_pct = 0; break;
+	case ID_TEXT_LARGE: cfg.scale_pct = 150; break;
+	case ID_TEXT_XL: cfg.scale_pct = 200; break;
+	case ID_PTR_NORMAL: cfg.pointer_size = 32; break;
+	case ID_PTR_LARGE: cfg.pointer_size = 48; break;
+	case ID_PTR_XL: cfg.pointer_size = 64; break;
+	case ID_REPEAT_TEST: s->focus = ID_REPEAT_TEST; break;
+	case ID_CLEAN: cleanup_run(); break;
+	case ID_UPD_CHECK:
+		snprintf(upd_msg, sizeof(upd_msg), "Checking for updates...");
+		redraw_all();
+		run(have("apt") ? "pkexec apt-get update -qq >/dev/null 2>&1" : "true");
+		updates_refresh();
+		break;
+	case ID_UPD_INSTALL:
+		spawn(have("apt") ? "foot -T 'Automatic Updates' sh -c \"sudo apt-get upgrade -y; flatpak update -y 2>/dev/null; "
+			"echo; read -p 'Updates are installed. Press Enter to close.' x\"" :
+			have("dnf") ? "foot -T 'Automatic Updates' sh -c \"sudo dnf upgrade -y; read -p 'Press Enter.' x\"" :
+			"foot -T 'Automatic Updates' sh -c \"sudo pacman -Syu; read -p 'Press Enter.' x\"");
+		break;
 	case ID_PRN_ADD:
 		/* the system's printer wizard finds USB and network printers; CUPS' own page otherwise */
 		spawn(have("system-config-printer") ? "system-config-printer --show-jobs ''" : "xdg-open http://localhost:631/admin");
@@ -2730,6 +2982,10 @@ static void sheet_motion(struct ui_win *w, double x, double y, bool held) {
 		cfg.speed = slider_value(w, ID_SPEED, x) * 2 - 100;
 	} else if (w->pressed == ID_GLASS_INTENSITY) {
 		cfg.glass_intensity = slider_value(w, ID_GLASS_INTENSITY, x);
+	} else if (w->pressed == ID_REPEAT_DELAY) {
+		cfg.repeat_delay = 1500 - slider_value(w, ID_REPEAT_DELAY, x) * 1350 / 100;
+	} else if (w->pressed == ID_REPEAT_RATE) {
+		cfg.repeat_rate = 1 + slider_value(w, ID_REPEAT_RATE, x) * 59 / 100;
 	} else if (drag_screen >= 0) {
 		int x0, y0;
 		double k;
@@ -2773,6 +3029,11 @@ static void sheet_key(struct ui_win *w, xkb_keysym_t sym, const char *utf8, int 
 		}
 		return;
 	}
+	if (s->kind == K_KEYBOARD && s->focus == ID_REPEAT_TEST) {
+		ui_edit(repeat_test, sizeof(repeat_test), &repeat_caret, sym, utf8, mods);
+		redraw_all();
+		return;
+	}
 	if (s->kind == K_BLUETOOTH && bt_prompt == 2) {
 		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
 			btc_send("%s", bt_pin);
@@ -2806,6 +3067,8 @@ static void open_applet(enum kind k) {
 	case K_NETWORK: net_refresh(false); break;
 	case K_BLUETOOTH: bt_refresh(); btc_start(); break;
 	case K_PRINTERS: prn_refresh(); break;
+	case K_CLEANUP: cleanup_msg[0] = 0; cleanup_refresh(); break;
+	case K_UPDATES: updates_refresh(); break;
 	case K_SOUNDS: sound_refresh(); break;
 	case K_POWER: power_refresh(); break;
 	case K_SYSTEM: system_refresh(); break;
