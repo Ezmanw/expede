@@ -34,6 +34,10 @@ static struct icon_set *icon(const char *name);
 struct config {
 	bool snap, tap, natural, sounds, clock24, glass;
 	int scale_pct, speed, screen_off, glass_intensity;
+	/* Windows 10 */
+	char accent[16];
+	bool dark, transparency, accent_titlebars;
+	bool wall_set; /* a wallpaper was chosen; otherwise each Windows version shows its own */
 	char wallpaper[256], wall_style[16], picture[64], keyboard[64];
 	char style[16], glass_color[32], frames[16], taskbar[16], start_menu[16], logon[16], sound_scheme[16], pointers[16], icons[16];
 	struct { char name[32], mode[32]; bool disabled, has_pos, primary; int x, y, rotation; } out[8];
@@ -69,6 +73,8 @@ static void config_load(void) {
 	cfg.tap = cfg.natural = cfg.sounds = cfg.glass = true;
 	cfg.screen_off = 10;
 	cfg.glass_intensity = 45;
+	snprintf(cfg.accent, sizeof(cfg.accent), "0078d7");
+	cfg.dark = cfg.transparency = true;
 	snprintf(cfg.wallpaper, sizeof(cfg.wallpaper), "Bliss.jpg");
 	snprintf(cfg.wall_style, sizeof(cfg.wall_style), "auto");
 	snprintf(cfg.style, sizeof(cfg.style), "xp");
@@ -102,12 +108,19 @@ static void config_load(void) {
 		else if (!strcmp(key, "scale")) cfg.scale_pct = !strcasecmp(val, "auto") ? 0 : atoi(val);
 		else if (!strcmp(key, "pointer_speed")) cfg.speed = atoi(val);
 		else if (!strcmp(key, "screen_off")) cfg.screen_off = atoi(val);
-		else if (!strcmp(key, "wallpaper")) snprintf(cfg.wallpaper, sizeof(cfg.wallpaper), "%s", !strcasecmp(val, "none") ? "" : val);
+		else if (!strcmp(key, "wallpaper")) {
+			snprintf(cfg.wallpaper, sizeof(cfg.wallpaper), "%s", !strcasecmp(val, "none") ? "" : val);
+			cfg.wall_set = true;
+		}
 		else if (!strcmp(key, "wallpaper_style")) snprintf(cfg.wall_style, sizeof(cfg.wall_style), "%s", val);
 		else if (!strcmp(key, "user_picture")) snprintf(cfg.picture, sizeof(cfg.picture), "%s", val);
 		else if (!strcmp(key, "keyboard_layout")) snprintf(cfg.keyboard, sizeof(cfg.keyboard), "%s", val);
 		else if (!strcmp(key, "style")) snprintf(cfg.style, sizeof(cfg.style), "%s", val);
 		else if (!strcmp(key, "glass")) cfg.glass = truthy(val);
+		else if (!strcmp(key, "accent_color")) snprintf(cfg.accent, sizeof(cfg.accent), "%s", val[0] == '#' ? val + 1 : val);
+		else if (!strcmp(key, "dark_mode")) cfg.dark = truthy(val);
+		else if (!strcmp(key, "transparency")) cfg.transparency = truthy(val);
+		else if (!strcmp(key, "accent_titlebars")) cfg.accent_titlebars = truthy(val);
 		else if (!strcmp(key, "glass_color")) snprintf(cfg.glass_color, sizeof(cfg.glass_color), "%s", val);
 		else if (!strcmp(key, "glass_intensity")) cfg.glass_intensity = atoi(val) < 0 ? 0 : atoi(val) > 100 ? 100 : atoi(val);
 		else if (!strcmp(key, "frames")) snprintf(cfg.frames, sizeof(cfg.frames), "%s", val);
@@ -159,6 +172,10 @@ static void config_save(void) {
 	fprintf(f, "glass = %s\n", cfg.glass ? "true" : "false");
 	fprintf(f, "glass_color = %s\n", cfg.glass_color);
 	fprintf(f, "glass_intensity = %d\n", cfg.glass_intensity);
+	fprintf(f, "accent_color = %s\n", cfg.accent);
+	fprintf(f, "dark_mode = %s\n", cfg.dark ? "true" : "false");
+	fprintf(f, "transparency = %s\n", cfg.transparency ? "true" : "false");
+	fprintf(f, "accent_titlebars = %s\n", cfg.accent_titlebars ? "true" : "false");
 	if (strcmp(cfg.frames, "auto")) fprintf(f, "frames = %s\n", cfg.frames);
 	if (strcmp(cfg.taskbar, "auto")) fprintf(f, "taskbar = %s\n", cfg.taskbar);
 	if (strcmp(cfg.start_menu, "auto")) fprintf(f, "start_menu = %s\n", cfg.start_menu);
@@ -177,7 +194,8 @@ static void config_save(void) {
 		fprintf(f, "scale = %d\n", cfg.scale_pct);
 	else
 		fprintf(f, "scale = auto\n");
-	fprintf(f, "wallpaper = %s\n", cfg.wallpaper[0] ? cfg.wallpaper : "none");
+	if (cfg.wall_set)
+		fprintf(f, "wallpaper = %s\n", cfg.wallpaper[0] ? cfg.wallpaper : "none");
 	fprintf(f, "wallpaper_style = %s\n", cfg.wall_style);
 	if (cfg.picture[0])
 		fprintf(f, "user_picture = %s\n", cfg.picture);
@@ -1089,7 +1107,7 @@ enum {
 	ID_WIFI_CONNECT, ID_WIFI_DISCONNECT, ID_WIFI_PW, ID_BT_POWER, ID_BT_SCAN, ID_BT_CONNECT, ID_BT_DISCONNECT,
 	ID_BT_REMOVE, ID_BT_YES, ID_BT_NO, ID_BT_PIN, ID_PRN_ADD, ID_PRN_DEFAULT, ID_PRN_TEST, ID_PRN_PAUSE, ID_PRN_DELETE, ID_PRN_PREFS, ID_JOB_CANCEL, ID_JOB_CANCEL_ALL, ID_PROFILE_SAVER, ID_PROFILE_BALANCED, ID_PROFILE_PERF, ID_SCREEN_ENABLED, ID_PRIMARY, ID_DUPLICATE, ID_ROT0, ID_ROT90, ID_ROT180, ID_ROT270, ID_REMOVE_PROG,
 	ID_CHANGE_PROGS, ID_ADD_PROGS, ID_SEARCH_PKGS, ID_INSTALL_PKG, ID_PKG_TERM, ID_PKG_QUERY,
-	ID_SET_ZONE, ID_XP_STYLE, ID_W7_STYLE, ID_GLASS_ON, ID_GLASS_INTENSITY,
+	ID_SET_ZONE, ID_XP_STYLE, ID_W7_STYLE, ID_W10_STYLE, ID_DARK, ID_TRANSPARENCY, ID_ACCENT_BARS, ID_GLASS_ON, ID_GLASS_INTENSITY,
 	ID_START_XP, ID_START_SEARCH, ID_START_W7, ID_OPEN_PERSONALIZE,
 	ID_SINGLE_END,        /* the ranges below must start above this */
 	ID_TAB = 500,         /* + tab */
@@ -1099,7 +1117,8 @@ enum {
 	ID_CATEGORY = 600,    /* + category */
 	ID_APPLET = 700,      /* + kind */
 	ID_SWATCH = 800,      /* + 0..14 */
-	ID_PART_OVR = 900,    /* + part * 3 + (0=auto, 1=xp, 2=7) */
+	ID_PART_OVR = 900,    /* + part * 4 + (0=auto, 1=xp, 2=7, 3=10) */
+	ID_ACCENT = 940,      /* + Windows 10 accent swatch */
 	ID_LIST = 1000,       /* + row */
 	ID_LIST2 = 5000,      /* + row, a second list */
 };
@@ -1320,6 +1339,8 @@ static void paint_monitor(cairo_t *cr, int x, int y) {
 	ui_fill(cr, x + 60, y + 148, 70, 6, 0xd9d6cc);
 }
 
+static int style_num(const char *v);
+
 static const char *mode_label(int i) { return screens[screen_sel].modes[i]; }
 
 /* fit every screen's layout box into the diagram area */
@@ -1404,11 +1425,12 @@ static void paint_display(struct sheet *s, cairo_t *cr) {
 		for (int i = 0; i < 6; i++)
 			ui_check(w, cr, ID_SCALE + i, 30 + (i % 3) * 120, 64 + (i / 3) * 24, cfg.scale_pct == pcts[i], true, labels[i]);
 		hint(cr, 30, 116, "Automatic picks a size from your screen's sharpness,\nlike Windows does.");
-		bool is7 = !strcasecmp(cfg.style, "7") || !strcasecmp(cfg.style, "win7") || !strcasecmp(cfg.style, "windows7");
-		ui_group(cr, 16, 160, SHEET_W - 32, 104, "Windows and buttons");
-		ui_check(w, cr, ID_XP_STYLE, 30, 184, !is7, true, "Windows XP style (Luna, Default blue)");
-		ui_check(w, cr, ID_W7_STYLE, 30, 208, is7, true, "Windows 7 style (Aero)");
-		ui_button(w, cr, ID_OPEN_PERSONALIZE, 30, 232, 140, "Personalization...", false, false);
+		int st = style_num(cfg.style);
+		ui_group(cr, 16, 160, SHEET_W - 32, 128, "Windows and buttons");
+		ui_check(w, cr, ID_XP_STYLE, 30, 184, st != 7 && st != 10, true, "Windows XP style (Luna, Default blue)");
+		ui_check(w, cr, ID_W7_STYLE, 30, 208, st == 7, true, "Windows 7 style (Aero)");
+		ui_check(w, cr, ID_W10_STYLE, 30, 232, st == 10, true, "Windows 10 style");
+		ui_button(w, cr, ID_OPEN_PERSONALIZE, 30, 256, 140, "Personalization...", false, false);
 	} else {
 		if (!n_screens) {
 			hint(cr, 24, 50, "No screen information yet: this tab needs Expede running.");
@@ -1475,6 +1497,28 @@ static const struct { const char *name, *label; uint32_t rgb; } swatches[] = {
 };
 #define N_SWATCHES ((int)(sizeof(swatches) / sizeof(*swatches)))
 
+/* "xp", "7" or "10" in any spelling -> 0, 7, 10; anything else -> -1 (auto) */
+static int style_num(const char *v) {
+	if (!strcasecmp(v, "7") || !strcasecmp(v, "win7") || !strcasecmp(v, "windows7"))
+		return 7;
+	if (!strcasecmp(v, "10") || !strcasecmp(v, "win10") || !strcasecmp(v, "windows10"))
+		return 10;
+	if (!strcasecmp(v, "xp") || !strcasecmp(v, "classic") || !strcasecmp(v, "modern") || !strcasecmp(v, "search"))
+		return 0;
+	return -1;
+}
+
+/* Windows 10's accent colours (Settings > Personalization > Colors) */
+static const struct { const char *hex, *label; uint32_t rgb; } accents[] = {
+	{"0078d7", "Default blue", 0x0078d7}, {"0063b1", "Navy blue", 0x0063b1}, {"8e8cd8", "Lavender", 0x8e8cd8},
+	{"744da9", "Purple", 0x744da9}, {"b146c2", "Orchid", 0xb146c2}, {"e3008c", "Pink", 0xe3008c},
+	{"e81123", "Red", 0xe81123}, {"ca5010", "Rust", 0xca5010}, {"f7630c", "Orange", 0xf7630c},
+	{"ffb900", "Gold", 0xffb900}, {"107c10", "Green", 0x107c10}, {"00b294", "Seafoam", 0x00b294},
+	{"00b7c3", "Teal", 0x00b7c3}, {"0099bc", "Cyan", 0x0099bc}, {"515c6b", "Storm", 0x515c6b},
+	{"4c4a48", "Graphite", 0x4c4a48},
+};
+#define N_ACCENTS ((int)(sizeof(accents) / sizeof(*accents)))
+
 static char *part_val(int p) {
 	switch (p) {
 	case 0: return cfg.frames;
@@ -1490,10 +1534,31 @@ static char *part_val(int p) {
 static void paint_personalize(struct sheet *s, cairo_t *cr) {
 	struct ui_win *w = s->win;
 	if (s->tab == 0) {
-		bool is7 = !strcasecmp(cfg.style, "7") || !strcasecmp(cfg.style, "win7") || !strcasecmp(cfg.style, "windows7");
+		int st = style_num(cfg.style);
 		ui_group(cr, 16, 40, SHEET_W - 32, 74, "Windows style");
-		ui_check(w, cr, ID_XP_STYLE, 30, 62, !is7, true, "Windows XP (Luna)");
-		ui_check(w, cr, ID_W7_STYLE, 30, 86, is7, true, "Windows 7 (Aero)");
+		ui_check(w, cr, ID_XP_STYLE, 30, 62, st != 7 && st != 10, true, "Windows XP (Luna)");
+		ui_check(w, cr, ID_W7_STYLE, 30, 86, st == 7, true, "Windows 7 (Aero)");
+		ui_check(w, cr, ID_W10_STYLE, 200, 62, st == 10, true, "Windows 10");
+		if (st == 10) {
+			/* Windows 10's Colors page */
+			ui_group(cr, 16, 124, SHEET_W - 32, 266, "Colors");
+			ui_text(cr, "Tahoma 8", "Choose your accent color:", 30, 146, 0, 0x000000);
+			for (int i = 0; i < N_ACCENTS; i++) {
+				int sx = 30 + (i % 8) * 44, sy = 168 + (i / 8) * 44;
+				bool sel = !strcasecmp(cfg.accent, accents[i].hex), hot = w->hot == ID_ACCENT + i;
+				if (sel || hot) {
+					ui_fill(cr, sx - 3, sy - 3, 38, 38, sel ? 0x000000 : 0x999999);
+					ui_fill(cr, sx - 1, sy - 1, 34, 34, 0xffffff);
+				}
+				ui_fill(cr, sx, sy, 32, 32, accents[i].rgb);
+				ui_reg(w, ID_ACCENT + i, sx - 2, sy - 2, 36, 36);
+			}
+			ui_check(w, cr, ID_DARK, 30, 268, cfg.dark, false, "Dark taskbar, Start and Action Center");
+			ui_check(w, cr, ID_TRANSPARENCY, 30, 292, cfg.transparency, false, "Transparency effects");
+			ui_check(w, cr, ID_ACCENT_BARS, 30, 316, cfg.accent_titlebars, false,
+				"Show accent color on title bars and window borders");
+			return;
+		}
 
 		ui_group(cr, 16, 124, SHEET_W - 32, 266, "Window color and appearance");
 		ui_text(cr, "Tahoma 8", "Change the color of your window borders, Start menu, and taskbar:", 30, 146, SHEET_W - 60, 0x000000);
@@ -1523,7 +1588,7 @@ static void paint_personalize(struct sheet *s, cairo_t *cr) {
 			s->dragging && w->pressed == ID_GLASS_INTENSITY);
 	} else {
 		ui_group(cr, 16, 40, SHEET_W - 32, 340, "Per-part style overrides");
-		hint(cr, 30, 62, "Mix Windows XP and Windows 7 parts, or leave on Auto\nto follow the main Windows style.");
+		hint(cr, 30, 62, "Mix Windows XP, 7 and 10 parts, or leave on Auto\nto follow the main Windows style.");
 		static const char *names[7] = {
 			"Window frames", "Taskbar", "Start menu", "Welcome / logon screen",
 			"Sound scheme", "Mouse pointers", "Desktop & shell icons"
@@ -1531,12 +1596,12 @@ static void paint_personalize(struct sheet *s, cairo_t *cr) {
 		for (int p = 0; p < 7; p++) {
 			int y = 104 + p * 36;
 			const char *v = part_val(p);
-			int cur = (!strcasecmp(v, "7") || !strcasecmp(v, "win7") || !strcasecmp(v, "windows7")) ? 2 :
-				(!strcasecmp(v, "xp") || !strcasecmp(v, "classic") || !strcasecmp(v, "modern") || !strcasecmp(v, "search")) ? 1 : 0;
+			int sn = style_num(v), cur = sn == 10 ? 3 : sn == 7 ? 2 : sn == 0 ? 1 : 0;
 			ui_text(cr, "Tahoma 8", names[p], 30, y + 2, 160, 0x000000);
-			ui_check(w, cr, ID_PART_OVR + p * 3 + 0, 195, y, cur == 0, true, "Auto");
-			ui_check(w, cr, ID_PART_OVR + p * 3 + 1, 260, y, cur == 1, true, "XP");
-			ui_check(w, cr, ID_PART_OVR + p * 3 + 2, 315, y, cur == 2, true, "Windows 7");
+			static const char *lbl[4] = {"Auto", "XP", "7", "10"};
+			static const int xs[4] = {185, 245, 295, 345};
+			for (int c = 0; c < 4; c++)
+				ui_check(w, cr, ID_PART_OVR + p * 4 + c, xs[c], y, cur == c, true, lbl[c]);
 		}
 	}
 }
@@ -2249,6 +2314,7 @@ static void list_pick(struct sheet *s, int i, bool second, int clicks) {
 	case K_DISPLAY:
 		if (s->tab == 0 && i < n_wallpapers) {
 			snprintf(cfg.wallpaper, sizeof(cfg.wallpaper), "%s", wallpapers[i].value);
+			cfg.wall_set = true;
 		} else if (s->tab == 2 && n_screens) {
 			struct screen *sc = &screens[screen_sel];
 			int c = out_index(sc->name, true);
@@ -2387,10 +2453,15 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 		return;
 	if (id >= ID_LIST2) { list_pick(s, id - ID_LIST2, true, 1); redraw_all(); return; }
 	if (id >= ID_LIST) { list_pick(s, id - ID_LIST, false, 1); redraw_all(); return; }
-	if (id >= ID_PART_OVR && id < ID_PART_OVR + 21) {
-		static const char *vals[3] = {"auto", "xp", "7"};
-		int p = (id - ID_PART_OVR) / 3, c = (id - ID_PART_OVR) % 3;
+	if (id >= ID_PART_OVR && id < ID_PART_OVR + 28) {
+		static const char *vals[4] = {"auto", "xp", "7", "10"};
+		int p = (id - ID_PART_OVR) / 4, c = (id - ID_PART_OVR) % 4;
 		snprintf(part_val(p), 16, "%s", vals[c]);
+		redraw_all();
+		return;
+	}
+	if (id >= ID_ACCENT && id < ID_ACCENT + N_ACCENTS) {
+		snprintf(cfg.accent, sizeof(cfg.accent), "%s", accents[id - ID_ACCENT].hex);
 		redraw_all();
 		return;
 	}
@@ -2422,8 +2493,16 @@ static void sheet_button(struct ui_win *w, int id, int button, bool pressed, dou
 	}
 	switch (id) {
 	case ID_SNAP: cfg.snap = !cfg.snap; break;
-	case ID_XP_STYLE: snprintf(cfg.style, sizeof(cfg.style), "xp"); break;
-	case ID_W7_STYLE: snprintf(cfg.style, sizeof(cfg.style), "7"); break;
+	case ID_XP_STYLE: case ID_W7_STYLE: case ID_W10_STYLE:
+		snprintf(cfg.style, sizeof(cfg.style), "%s", id == ID_XP_STYLE ? "xp" : id == ID_W7_STYLE ? "7" : "10");
+		/* switching version brings its own wallpaper, unless you'd picked a different one */
+		if (!strcmp(cfg.wallpaper, "Bliss.jpg") || !strcmp(cfg.wallpaper, "Windows 7.jpg") ||
+				!strcmp(cfg.wallpaper, "Windows 10.jpg"))
+			cfg.wall_set = false;
+		break;
+	case ID_DARK: cfg.dark = !cfg.dark; break;
+	case ID_TRANSPARENCY: cfg.transparency = !cfg.transparency; break;
+	case ID_ACCENT_BARS: cfg.accent_titlebars = !cfg.accent_titlebars; break;
 	case ID_GLASS_ON: cfg.glass = !cfg.glass; break;
 	case ID_OPEN_PERSONALIZE: open_applet(K_PERSONALIZE); break;
 	case ID_START_XP: snprintf(cfg.start_menu, sizeof(cfg.start_menu), "xp"); break;
