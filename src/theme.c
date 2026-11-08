@@ -258,9 +258,13 @@ static PangoFontDescription *version_font(const char *font) {
 
 static PangoLayout *make_layout(cairo_t *cr, const char *font, const char *text, double maxw, bool crisp) {
 	PangoLayout *l = pango_cairo_create_layout(cr);
+	/* ClearType-era text (7 and 10) is smoothed, and so is XP's on high-DPI
+	 * screens, where unsmoothed pixels just look jagged */
+	if (font_version >= 7 || ui_scale >= 1.5)
+		crisp = false;
 	cairo_font_options_t *fo = cairo_font_options_create();
 	cairo_font_options_set_antialias(fo, crisp ? CAIRO_ANTIALIAS_NONE : CAIRO_ANTIALIAS_GRAY);
-	cairo_font_options_set_hint_style(fo, CAIRO_HINT_STYLE_FULL);
+	cairo_font_options_set_hint_style(fo, crisp ? CAIRO_HINT_STYLE_FULL : CAIRO_HINT_STYLE_SLIGHT);
 	cairo_font_options_set_hint_metrics(fo, CAIRO_HINT_METRICS_ON);
 	pango_cairo_context_set_font_options(pango_layout_get_context(l), fo);
 	cairo_font_options_destroy(fo);
@@ -268,8 +272,6 @@ static PangoLayout *make_layout(cairo_t *cr, const char *font, const char *text,
 	pango_cairo_context_set_resolution(pango_layout_get_context(l), 96);
 	pango_layout_context_changed(l);
 	PangoFontDescription *d = version_font(font);
-	if (font_version >= 7)
-		crisp = false; /* ClearType-era text is smoothed */
 	pango_layout_set_font_description(l, d);
 	pango_font_description_free(d);
 	pango_layout_set_text(l, text, -1);

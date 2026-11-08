@@ -207,7 +207,7 @@ static bool w7(struct view *v) {
 
 /* Windows 10 frames: a 1px border with a soft shadow (which is also the resize
  * edge) around a flat 31px title bar (23 when maximized) */
-#define W10_SHADOW 8
+#define W10_SHADOW 12
 #define W10_CAPTION 32
 static bool w10(struct view *v) {
 	return theme_of(v->server, v->server->st_frames)->version == 10;
@@ -618,14 +618,15 @@ static cairo_surface_t *w10_piece(struct view *v, int px, int py, int pw, int ph
 	cairo_t *cr = cairo_create(c);
 	cairo_translate(cr, -px, -py);
 	bool max = v->maximized, accent = s->opt_accent_titlebars && v->active;
-	/* the soft shadow outside the 1px border (none when maximized) */
+	/* the soft shadow outside the 1px border (none when maximized): fades out over
+	 * W10_SHADOW pixels, a little heavier below, like Windows 10's */
 	if (!max) {
-		for (int i = 0; i < W10_SHADOW; i++) {
-			double a = 0.012 * (i + 1) * (i + 1) / W10_SHADOW;
-			cairo_rectangle(cr, W10_SHADOW - 1 - i - 0.5, 4 - i * 0.5, fw - 2 * (W10_SHADOW - 1 - i) + 1,
-				fh - 4 + i * 1.5 - (W10_SHADOW - 1 - i));
-			cairo_set_source_rgba(cr, 0, 0, 0, a * (v->active ? 1 : 0.6));
-			cairo_set_line_width(cr, 1);
+		cairo_set_line_width(cr, 1);
+		double bx0 = sw - 1, by1 = caph + v->ch + 1, bxw = v->cw + 2;
+		for (int d = 1; d <= W10_SHADOW; d++) {
+			double f = 1 - (double)d / (W10_SHADOW + 1), a = (v->active ? 0.20 : 0.11) * f * f;
+			cairo_rectangle(cr, bx0 - d + 0.5, -0.5 + d * 0.3, bxw + 2 * d - 1, by1 + d * 0.7 + 1);
+			cairo_set_source_rgba(cr, 0, 0, 0, a);
 			cairo_stroke(cr);
 		}
 	}

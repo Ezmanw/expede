@@ -705,7 +705,15 @@ static void draw_taskbar10(struct shell *sh) {
 		cairo_rectangle(cr, 48, 0, sw, bh);
 		cairo_fill(cr);
 		draw_mdl2(cr, "\uE721", 10, 48 + 22, bh / 2.0, 0x000000);
-		draw_text(cr, "Segoe UI 9", "Type here to search", 48 + 42, (bh - 16) / 2, sw - 50, 0x6b6b6b, 0, 0, 0, false);
+		if (sh->start_open && sh->query[0]) {
+			/* what you type in Start shows here, with the caret */
+			int qw = draw_text(cr, "Segoe UI 9", sh->query, 48 + 42, (bh - 16) / 2, sw - 50, 0x000000, 0, 0, 0, false);
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_rectangle(cr, 48 + 43 + (qw < sw - 50 ? qw : sw - 50), 11, 1, bh - 22);
+			cairo_fill(cr);
+		} else {
+			draw_text(cr, "Segoe UI 9", "Type here to search", 48 + 42, (bh - 16) / 2, sw - 50, 0x6b6b6b, 0, 0, 0, false);
+		}
 	} else {
 		sh->search_box10 = (struct wlr_box){48, 0, 48, bh};
 		if (sh->search_hot) {
@@ -1679,6 +1687,18 @@ static void draw_menu10(struct shell *sh) {
 		}
 		if (!sh->n_results)
 			draw_text(cr, "Segoe UI 9", "No results", x + 16, y, 0, 0xbbbbbb, 0, 0, 0, false);
+		/* no search box on the taskbar (a narrow screen): Start shows one at its foot */
+		if (!bar10(sh) || sh->search_box10.width < 100) {
+			int by = mh - 48;
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_rectangle(cr, x + 8, by, mw - x - 16, 40);
+			cairo_fill(cr);
+			draw_mdl2(cr, "\uE721", 10, x + 28, by + 20, 0x000000);
+			int qw = draw_text(cr, "Segoe UI 10", sh->query, x + 48, by + 10, mw - x - 70, 0x000000, 0, 0, 0, false);
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_rectangle(cr, x + 49 + qw, by + 10, 1, 20);
+			cairo_fill(cr);
+		}
 	} else {
 		/* the A-Z list, with a letter above each group */
 		int lx = 48, lw = 270, y = 8 - sh->scroll10;
@@ -1789,6 +1809,8 @@ static void draw_menu10(struct shell *sh) {
 		}
 	}
 	cairo_destroy(cr);
+	if (bar10(sh))
+		draw_taskbar10(sh); /* the search box there shows what's being typed */
 	int my = sh->h - bar_h(sh) - mh;
 	show(&sh->menu, srv->layer_menu, c, 0, my);
 	wlr_scene_node_set_enabled(&sh->menu->node, true);
