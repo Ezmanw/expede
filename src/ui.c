@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <linux/input-event-codes.h>
 #include <poll.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -144,9 +145,19 @@ const char *ui_assets_dir(void) {
 
 /* ------------------------------------------------------------------ drawing */
 
+/* Windows 10 Settings draws the classic pages inside its own layout */
+static int org_x, org_y;
+bool ui_w10_look;
+uint32_t ui_accent = 0x0078d7;
+
+void ui_set_origin(int x, int y) {
+	org_x = x;
+	org_y = y;
+}
+
 void ui_reg(struct ui_win *w, int id, int x, int y, int ww, int hh) {
 	if (w->n_rects < (int)(sizeof(w->rects) / sizeof(*w->rects)))
-		w->rects[w->n_rects++] = (struct ui_rect){id, x, y, ww, hh};
+		w->rects[w->n_rects++] = (struct ui_rect){id, x + org_x, y + org_y, ww, hh};
 }
 
 int ui_state(struct ui_win *w, int id) {
@@ -187,7 +198,38 @@ void ui_button(struct ui_win *w, cairo_t *cr, int id, int x, int y, int bw, cons
 		ui_reg(w, id, x, y, bw, 23);
 }
 
+/* Windows 10's on/off switch, with its On / Off and the setting's name beside it */
+static void w10_toggle(struct ui_win *w, cairo_t *cr, int id, int x, int y, bool on, const char *label) {
+	double tx = x + 0.5, ty = y - 1.5, tw = 40, th = 20, r = th / 2;
+	bool hot = ui_state(w, id) > 0;
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, tx + r, ty + r, r, M_PI / 2, 3 * M_PI / 2);
+	cairo_arc(cr, tx + tw - r, ty + r, r, -M_PI / 2, M_PI / 2);
+	cairo_close_path(cr);
+	if (on) {
+		cairo_set_source_rgb(cr, ((ui_accent >> 16) & 255) / 255.0, ((ui_accent >> 8) & 255) / 255.0,
+			(ui_accent & 255) / 255.0);
+		cairo_fill(cr);
+	} else {
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		cairo_fill_preserve(cr);
+		cairo_set_line_width(cr, 2);
+		cairo_set_source_rgb(cr, hot ? 0 : 0.2, hot ? 0 : 0.2, hot ? 0 : 0.2);
+		cairo_stroke(cr);
+	}
+	cairo_arc(cr, on ? tx + tw - r : tx + r, ty + r, 5, 0, 2 * M_PI);
+	cairo_set_source_rgb(cr, on ? 1 : 0.2, on ? 1 : 0.2, on ? 1 : 0.2);
+	cairo_fill(cr);
+	ui_text(cr, "Segoe UI 10", on ? "On" : "Off", x + 50, y, 0, 0x000000);
+	ui_text(cr, "Segoe UI 10", label, x + 84, y, 0, 0x000000);
+	ui_reg(w, id, x, y - 2, 84 + text_width("Segoe UI 10", label) + 4, 22);
+}
+
 void ui_check(struct ui_win *w, cairo_t *cr, int id, int x, int y, bool on, bool radio, const char *label) {
+	if (ui_w10_look && !radio) {
+		w10_toggle(w, cr, id, x, y, on, label);
+		return;
+	}
 	/* checkbox: unchecked n/h/p/d, checked n/h/p/d...; radio: unchecked x4, checked x4 */
 	draw_frame_true(cr, radio ? ui_theme.radio : ui_theme.checkbox, radio ? 8 : ui_theme.version >= 7 ? 20 : 12,
 		(on ? 4 : 0) + ui_state(w, id), x, y + 1);
@@ -196,6 +238,11 @@ void ui_check(struct ui_win *w, cairo_t *cr, int id, int x, int y, bool on, bool
 }
 
 void ui_group(cairo_t *cr, int x, int y, int gw, int gh, const char *title) {
+	if (ui_w10_look) {
+		/* Windows 10 Settings: a section heading, no box */
+		ui_text(cr, "Segoe UI Semibold 13", title, x, y - 4, gw, 0x000000);
+		return;
+	}
 	draw_image(cr, &ui_theme.groupbox, 0, x, y + 6, gw, gh - 6);
 	int tw = text_width("Tahoma 8", title);
 	ui_fill(cr, x + 6, y, tw + 6, 14, ui_theme.version >= 7 ? 0xffffff : 0xfcfcfe);

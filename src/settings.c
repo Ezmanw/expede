@@ -15,6 +15,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1174,10 +1175,14 @@ static struct icon_set *icon(const char *name) {
 	return &icache[0].s;
 }
 
+static struct ui_win *w10_win; /* Windows 10 Settings, when that's what's open */
+
 static void redraw_all(void) {
 	for (int k = 0; k < K_COUNT; k++)
 		if (sheets[k].win && sheets[k].win->alive)
 			ui_redraw(sheets[k].win);
+	if (w10_win && w10_win->alive)
+		ui_redraw(w10_win);
 }
 
 /* ---------------------------------------------------------------- shared painting */
@@ -3058,11 +3063,8 @@ static void sheet_key(struct ui_win *w, xkb_keysym_t sym, const char *utf8, int 
 	}
 }
 
-static void open_applet(enum kind k) {
-	struct sheet *s = &sheets[k];
-	if (s->win && s->win->alive)
-		return;
-	*s = (struct sheet){.kind = k};
+/* read what an applet shows (Wi-Fi networks, devices, printers...) */
+static void refresh_kind(enum kind k) {
 	switch (k) {
 	case K_NETWORK: net_refresh(false); break;
 	case K_BLUETOOTH: bt_refresh(); btc_start(); break;
@@ -3077,6 +3079,14 @@ static void open_applet(enum kind k) {
 	case K_DATETIME: zones_refresh(); break;
 	default: break;
 	}
+}
+
+static void open_applet(enum kind k) {
+	struct sheet *s = &sheets[k];
+	if (s->win && s->win->alive)
+		return;
+	*s = (struct sheet){.kind = k};
+	refresh_kind(k);
 	int ww = k == K_PROGRAMS ? 600 : SHEET_W, hh = SHEET_H;
 	s->win = ui_window(applets[k].title, "expede-settings", ww, hh, false);
 	s->win->data = s;
@@ -3154,6 +3164,8 @@ static void load_theme_assets(void) {
 		cat_icons[c] = theme_icon(&ui_theme, categories[c].icon);
 }
 
+#include "settings10.c"
+
 int main(int argc, char **argv) {
 	if (!ui_init("expede-settings"))
 		return 1;
@@ -3164,6 +3176,10 @@ int main(int argc, char **argv) {
 	for (int k = 1; argc > 1 && k < K_COUNT; k++)
 		if (applets[k].arg && !strcmp(argv[1], applets[k].arg))
 			start = k;
+	if (ui_theme.version == 10) {
+		settings10_open(start);
+		return ui_run();
+	}
 	if (start == K_CP) {
 		struct ui_win *w = ui_window("Control Panel", "expede-settings", 660, 470, false);
 		w->paint = paint_cp;

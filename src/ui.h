@@ -44,6 +44,12 @@ void ui_redraw(struct ui_win *w);
 int ui_run(void); /* until the last window closes */
 void ui_quit(void);
 
+/* Windows 10 Settings: section headings instead of group boxes, switches instead
+ * of checkboxes, the accent for them, and an offset for everything registered */
+extern bool ui_w10_look;
+extern uint32_t ui_accent;
+void ui_set_origin(int x, int y);
+
 /* widgets: draw and register a hit rectangle */
 void ui_reg(struct ui_win *w, int id, int x, int y, int ww, int hh);
 int ui_state(struct ui_win *w, int id); /* 0 normal, 1 hot, 2 pressed */
